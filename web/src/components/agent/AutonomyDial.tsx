@@ -5,7 +5,7 @@ import { useVariant } from "@/lib/variants";
 export const MODES: { id: AutonomyMode; name: string; blurb: string }[] = [
   { id: 1, name: "Observe only", blurb: "Watches and reports. Never spends, never proposes." },
   { id: 2, name: "Advise only", blurb: "Buys intelligence, recommends. Takes no trading action." },
-  { id: 3, name: "Propose and wait", blurb: "Constructs exact trades, waits for your approval in wallet." },
+  { id: 3, name: "Propose and wait", blurb: "When you ask to trade (or bands drift), prepares a real swap and waits for your wallet approval." },
   { id: 4, name: "Autonomous within limits", blurb: "Executes from the agent treasury inside hard limits." },
 ];
 

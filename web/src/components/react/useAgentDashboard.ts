@@ -4,7 +4,7 @@ import { type DashboardSnapshot, type RunEvent, loadDashboard } from "../../lib/
 type State = { data: DashboardSnapshot | null; loading: boolean; error: string | null };
 
 const REFRESH_KINDS =
-  /^(payment\.settled|trade\.(verified|submitted|proposed)|run\.(completed|failed)|analysis\.completed|portfolio\.(read|updated))$/;
+  /^(payment\.settled|trade\.(verified|submitted|proposed)|run\.(completed|failed)|analysis\.completed|portfolio\.(read|updated)|session\.(cleared|removed|activated))$/;
 
 export function useAgentDashboard() {
   const [state, setState] = useState<State>({ data: null, loading: true, error: null });

@@ -213,3 +213,60 @@ export class MarketDataProvider implements DataProvider {
     }
   }
 }
+
+/**
+ * Free CoinGecko batch quote for workspace display (connect / dashboard).
+ * Not a paid x402 read — trade authorization still requires paid provenance.
+ */
+export async function fetchDisplayUsdPrices(
+  symbols: readonly string[],
+): Promise<{ prices: Record<string, number>; provenance: "live" | "fallback" }> {
+  const wanted = [...new Set(symbols.map((symbol) => symbol.toUpperCase()))];
+  const prices: Record<string, number> = {};
+  if (wanted.includes("USDC")) prices.USDC = 1;
+
+  const coinIds = wanted
+    .map((symbol) => ({ symbol, coinId: COIN_IDS[symbol] }))
+    .filter((row): row is { symbol: string; coinId: string } => Boolean(row.coinId));
+
+  if (coinIds.length === 0) {
+    return { prices, provenance: "fallback" };
+  }
+
+  try {
+    const ids = [...new Set(coinIds.map((row) => row.coinId))].join(",");
+    const payload = await fetchJson<Record<string, { usd?: number }>>(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(ids)}&vs_currencies=usd`,
+      30_000,
+    );
+    for (const { symbol, coinId } of coinIds) {
+      const usd = payload[coinId]?.usd;
+      if (typeof usd === "number" && Number.isFinite(usd) && usd > 0) {
+        prices[symbol] = usd;
+      }
+    }
+    if (prices.USDC === undefined) prices.USDC = 1;
+    return { prices, provenance: "live" };
+  } catch (error) {
+    console.warn(
+      `[display-prices] CoinGecko unavailable; using stablecoin + labeled fallbacks:`,
+      error instanceof Error ? error.message : error,
+    );
+    // Deterministic labeled mid prices so the sidebar still marks the book on connect.
+    const provider = new MarketDataProvider();
+    for (const symbol of wanted) {
+      if (prices[symbol] !== undefined) continue;
+      if (!COIN_IDS[symbol]) continue;
+      try {
+        const result = await provider.fetch("spot-price", { symbol });
+        const body = result.data && typeof result.data === "object" ? result.data as Record<string, unknown> : {};
+        const price = typeof body.price === "number" ? body.price : undefined;
+        if (typeof price === "number" && price > 0) prices[symbol] = price;
+      } catch {
+        /* leave unpriced */
+      }
+    }
+    if (prices.USDC === undefined) prices.USDC = 1;
+    return { prices, provenance: "fallback" };
+  }
+}

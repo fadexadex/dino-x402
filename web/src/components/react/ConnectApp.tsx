@@ -213,33 +213,35 @@ export function ConnectApp() {
             </p>
 
             {sessions.length > 0 && (
-              <div className="mt-5 rounded-lg border border-line bg-card p-3">
-                <p className="text-[11px] font-medium tracking-[0.08em] text-ink-3 uppercase">Saved sessions</p>
-                <div className="mt-2 grid gap-1">
-                  {sessions.map((session) => (
-                    <button
-                      key={session.id}
-                      type="button"
-                      disabled={busy}
-                      onClick={() => void onResumeSession(session.id)}
-                      className="flex items-center justify-between rounded-md px-2 py-2 text-left transition-colors hover:bg-hover disabled:opacity-50"
-                    >
-                      <span>
-                        <span className="block font-mono text-[12px] text-ink">{session.accountId}</span>
-                        <span className="mt-0.5 block text-[11px] text-ink-3">
-                          {session.kind === "agent_managed" ? "autonomous" : "wallet"} · {session.status}
+              <div className="mt-5 flex max-h-[min(18rem,40vh)] flex-col rounded-lg border border-line bg-card p-3">
+                <p className="shrink-0 text-[11px] font-medium tracking-[0.08em] text-ink-3 uppercase">Saved sessions</p>
+                <div className="mt-2 min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-width:thin]">
+                  <div className="grid gap-1">
+                    {sessions.map((session) => (
+                      <button
+                        key={session.id}
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void onResumeSession(session.id)}
+                        className="flex items-center justify-between rounded-md px-2 py-2 text-left transition-colors hover:bg-hover disabled:opacity-50"
+                      >
+                        <span>
+                          <span className="block font-mono text-[12px] text-ink">{session.accountId}</span>
+                          <span className="mt-0.5 block text-[11px] text-ink-3">
+                            {session.kind === "agent_managed" ? "autonomous" : "wallet"} · {session.status}
+                          </span>
                         </span>
-                      </span>
-                      <span className="text-[11px] text-ink-2">Resume</span>
-                    </button>
-                  ))}
+                        <span className="text-[11px] text-ink-2">Resume</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 {accountId && (
                   <button
                     type="button"
                     disabled={busy}
                     onClick={() => void onDisconnect()}
-                    className="mt-2 rounded-control px-2 py-1.5 text-[12px] text-ink-3 hover:bg-hover"
+                    className="mt-2 shrink-0 rounded-control px-2 py-1.5 text-[12px] text-ink-3 hover:bg-hover"
                   >
                     Disconnect current wallet
                   </button>

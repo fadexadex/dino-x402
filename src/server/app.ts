@@ -19,6 +19,7 @@ import { sseBroadcaster } from "./stream.js";
 import { readPortfolio } from "../portfolio/reader.js";
 import { executeSaucerSwap } from "../trading/executor.js";
 import { mergeLivePortfolioValuation, pricesUsdFromPortfolio, validateAllocationBands, valuePortfolio } from "../portfolio/allocation.js";
+import { fetchDisplayUsdPrices } from "../providers/market/market-provider.js";
 import type { AgentRunInput } from "../agent/types.js";
 import type { DurableEvent, PortfolioMandate, PortfolioProfile, ScheduleConfig } from "../store/types.js";
 import { eventForUi, isUserFacingEvent } from "./events.js";
@@ -45,7 +46,9 @@ const historyFromPurchase = (data: unknown): Array<{ t: number; price: number; p
   return history.flatMap((point) => {
     if (!point || typeof point !== "object") return [];
     const row = point as Record<string, unknown>;
-    const t = typeof row.t === "number" ? row.t : typeof row.timestamp === "number" ? row.timestamp : NaN;
+    const rawT = typeof row.t === "number" ? row.t : typeof row.timestamp === "number" ? row.timestamp : NaN;
+    // CoinGecko sometimes returns unix seconds — normalize to ms so event focus lines land on the chart.
+    const t = Number.isFinite(rawT) && rawT > 0 && rawT < 1e12 ? rawT * 1000 : rawT;
     const price = typeof row.price === "number" ? row.price : typeof row.close === "number" ? row.close : NaN;
     if (!Number.isFinite(t) || !Number.isFinite(price) || price <= 0) return [];
     return [{ t, price, provenance }];
@@ -138,10 +141,23 @@ export const createApp = (
     store.saveMandate(mandate);
   }
 
+  const resolveTradeProfile = (trade: { runId: string; accountId: string }) => {
+    const state = store.getState();
+    const run = state.runs.find((item) => item.id === trade.runId);
+    // Prefer the run's custody profile — shared treasury account IDs must not
+    // resolve to agent_managed and auto-sign Mode 3 wallet proposals.
+    return (run?.profileId ? store.getProfile(run.profileId) : null)
+      ?? (state.activeProfileId ? store.getProfile(state.activeProfileId) : null)
+      ?? state.profiles?.find((item) => item.accountId === trade.accountId && item.kind === "user_wallet" && item.status === "active")
+      ?? state.profiles?.find((item) => item.accountId === trade.accountId && item.status === "active")
+      ?? state.profiles?.find((item) => item.accountId === trade.accountId)
+      ?? null;
+  };
+
   const executePendingTrade = async (tradeId: string) => {
     const trade = store.getState().pendingTrades.find((item) => item.id === tradeId && item.status === "pending");
     if (!trade) return { status: 404 as const, body: { error: "Pending trade not found or already evaluated" } };
-    const profile = store.getState().profiles?.find((item) => item.accountId === trade.accountId);
+    const profile = resolveTradeProfile(trade);
     const profileId = profile?.id;
     if (store.isHalted()) return { status: 423 as const, body: { error: "Global kill switch is active" } };
     if (!trade.quote || !trade.builtTransaction) return { status: 409 as const, body: { error: "Trade has no fresh executable SaucerSwap quote" } };
@@ -150,7 +166,12 @@ export const createApp = (
       return { status: 409 as const, body: { error: "The executable quote expired; run the agent again for a fresh quote" } };
     }
     // Mode 3 user-wallet custody: browser must sign via WalletConnect — never the server key.
-    if (profile?.kind === "user_wallet" || trade.accountId !== config.agentPayerId || !config.agentPayerKey) {
+    // Resolve profile via run.profileId first so a shared treasury accountId cannot
+    // flip a user-wallet proposal onto the agent signer and clear the approval card.
+    const requiresWalletSignature = profile?.kind === "user_wallet"
+      || trade.accountId !== config.agentPayerId
+      || !config.agentPayerKey;
+    if (requiresWalletSignature) {
       const params = trade.builtTransaction.encodedParameters;
       const encodedParameters = Buffer.from(params).toString("base64");
       return {
@@ -183,12 +204,14 @@ export const createApp = (
     }
     // Persist the one-way authorization transition before touching the network.
     // A timeout after Hedera consensus must never make the same proposal retryable.
+    const agentKey = config.agentPayerKey;
+    if (!agentKey) return { status: 503 as const, body: { error: "Agent signer is not configured" } };
     store.updatePendingTrade(tradeId, { status: "approved" }, profileId);
     let result;
     try {
       result = await executeSaucerSwap({
         payerId: trade.accountId,
-        payerKey: config.agentPayerKey,
+        payerKey: agentKey,
         quote: trade.quote,
         transaction: trade.builtTransaction,
         mirrorBaseUrl: config.mirrorNodeBaseUrl,
@@ -300,6 +323,30 @@ export const createApp = (
     }));
   });
 
+  app.post("/api/v1/profiles/:profileId/clear", (c) => {
+    const profile = store.getProfile(c.req.param("profileId"));
+    if (!profile) return c.json({ error: "Profile not found" }, 404);
+    try {
+      const result = store.clearProfileSession(profile.id);
+      sseBroadcaster.broadcast("session.cleared", { profileId: profile.id, ...result }, { profileId: profile.id });
+      return c.json({ ok: true, profileId: profile.id, ...result });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : "Unable to clear session" }, 400);
+    }
+  });
+
+  app.delete("/api/v1/profiles/:profileId", (c) => {
+    const profileId = c.req.param("profileId");
+    try {
+      const removed = store.removeProfile(profileId);
+      if (!removed) return c.json({ error: "Profile not found" }, 404);
+      sseBroadcaster.broadcast("session.removed", { profileId });
+      return c.json({ ok: true, profileId });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : "Unable to remove session" }, 400);
+    }
+  });
+
   app.post("/api/v1/profiles/:profileId/activate", (c) => {
     const profile = store.getProfile(c.req.param("profileId"));
     if (!profile) return c.json({ error: "Profile not found" }, 404);
@@ -400,7 +447,15 @@ export const createApp = (
     } | null = null;
     try {
       const live = await readPortfolio(profile.accountId, { mirrorBaseUrl: config.mirrorNodeBaseUrl });
-      const merged = mergeLivePortfolioValuation(live, latestValued);
+      // Always refresh display USD marks on dashboard load. Stale run marks (or a
+      // bad paid SAUCE print) must not freeze the sidebar total vs Mirror qty.
+      const display = await fetchDisplayUsdPrices(live.allocations.map((asset) => asset.symbol));
+      const merged = mergeLivePortfolioValuation(
+        live,
+        latestValued,
+        display.prices,
+        Object.keys(display.prices).length > 0 ? `display:${display.provenance}` : undefined,
+      );
       portfolio = {
         accountId: live.accountId,
         asOf: live.fetchedAt,
@@ -409,7 +464,8 @@ export const createApp = (
         assets: merged.assets,
         valued: merged.valued,
       };
-    } catch {
+    } catch (error) {
+      console.warn(`[dashboard] live portfolio read failed for ${profile.accountId}:`, error instanceof Error ? error.message : error);
       if (latestValued) {
         const totalUsd = latestValued.totalUsdValue ?? 0;
         portfolio = {
@@ -517,7 +573,13 @@ export const createApp = (
         ?? store.getState().runs.find((run) => run.accountId === profile.accountId && run.portfolioBefore)?.portfolioBefore;
       try {
         const live = await readPortfolio(profile.accountId, { mirrorBaseUrl: config.mirrorNodeBaseUrl });
-        const merged = mergeLivePortfolioValuation(live, latestValued);
+        const display = await fetchDisplayUsdPrices(live.allocations.map((asset) => asset.symbol));
+        const merged = mergeLivePortfolioValuation(
+          live,
+          latestValued,
+          display.prices,
+          Object.keys(display.prices).length > 0 ? `display:${display.provenance}` : undefined,
+        );
         return c.json(jsonSafe({
           accountId: profile.accountId,
           asOf: live.fetchedAt,
@@ -526,21 +588,33 @@ export const createApp = (
           assets: merged.assets,
           valued: merged.valued,
         }));
-      } catch {
-        if (!latestValued) throw new Error("Unable to read live portfolio");
+      } catch (liveError) {
+        console.warn(`[portfolio] Mirror read failed for ${profile.accountId}:`, liveError instanceof Error ? liveError.message : liveError);
+        if (latestValued) {
+          return c.json(jsonSafe({
+            accountId: profile.accountId,
+            asOf: latestValued.fetchedAt,
+            totalUsd: latestValued.totalUsdValue,
+            provenance: latestValued.provenance,
+            assets: latestValued.allocations.map((asset) => ({
+              symbol: asset.symbol,
+              balance: asset.balanceFormatted,
+              usdValue: asset.usdValue,
+              allocationPct: asset.allocationPct,
+              provenance: latestValued.provenance,
+            })),
+            valued: (latestValued.totalUsdValue ?? 0) > 0,
+          }));
+        }
+        // Unknown / deleted test accounts should not 503 the whole workspace.
         return c.json(jsonSafe({
           accountId: profile.accountId,
-          asOf: latestValued.fetchedAt,
-          totalUsd: latestValued.totalUsdValue,
-          provenance: latestValued.provenance,
-          assets: latestValued.allocations.map((asset) => ({
-            symbol: asset.symbol,
-            balance: asset.balanceFormatted,
-            usdValue: asset.usdValue,
-            allocationPct: asset.allocationPct,
-            provenance: latestValued.provenance,
-          })),
-          valued: (latestValued.totalUsdValue ?? 0) > 0,
+          asOf: new Date().toISOString(),
+          totalUsd: 0,
+          provenance: "live",
+          assets: [],
+          valued: false,
+          error: "Mirror has no balances for this account yet.",
         }));
       }
     } catch (error) {

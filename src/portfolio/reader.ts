@@ -36,24 +36,30 @@ async function fetchTokenInfo(
   if (cached) return cached;
 
   const known = KNOWN_TOKENS[tokenId];
-  if (known) {
-    const entry = { ...known, decimals: 6 };
-    tokenInfoCache.set(tokenId, entry);
-    return entry;
-  }
 
-  const response = await (options.fetchFn ?? fetch)(`${options.mirrorBaseUrl ?? MIRROR_BASE}/api/v1/tokens/${tokenId}`, {
+  try {
+    const response = await (options.fetchFn ?? fetch)(`${options.mirrorBaseUrl ?? MIRROR_BASE}/api/v1/tokens/${tokenId}`, {
       signal: AbortSignal.timeout(FETCH_TIMEOUT),
     });
     if (!response.ok) throw new Error(`Token info HTTP ${response.status} for ${tokenId}`);
     const data = (await response.json()) as MirrorTokenInfoResponse;
+    const decimals = Number(data.decimals);
     const entry = {
-      symbol: data.symbol || tokenId,
-      name: data.name || "Unknown Token",
-      decimals: Number(data.decimals) || 0,
+      // Prefer our curated symbols for SaucerSwap testnet ids, but never invent decimals.
+      symbol: known?.symbol || data.symbol || tokenId,
+      name: known?.name || data.name || "Unknown Token",
+      decimals: Number.isFinite(decimals) ? decimals : known ? 6 : 0,
     };
     tokenInfoCache.set(tokenId, entry);
     return entry;
+  } catch {
+    // One unknown/slow token must not blank the whole wallet sidebar.
+    const entry = known
+      ? { ...known, decimals: 6 }
+      : { symbol: tokenId, name: "Unknown Token", decimals: 0 };
+    tokenInfoCache.set(tokenId, entry);
+    return entry;
+  }
 }
 
 export async function readPortfolio(accountId: string, options: PortfolioReaderOptions = {}): Promise<Portfolio> {
@@ -72,23 +78,25 @@ export async function readPortfolio(accountId: string, options: PortfolioReaderO
       const hbarFormatted = Number(hbarBalance) / 1e8;
 
       const tokenEntries = data.balance.tokens ?? [];
-      const tokens: TokenBalance[] = await Promise.all(
+      const settled = await Promise.allSettled(
         tokenEntries
           .filter((t) => t.balance > 0)
           .map(async (t) => {
             const info = await fetchTokenInfo(t.token_id, options);
             const balance = BigInt(t.balance);
-            const balanceFormatted = Number(balance) / Math.pow(10, info.decimals);
+            const decimals = Number.isFinite(info.decimals) ? info.decimals : 0;
+            const balanceFormatted = Number(balance) / Math.pow(10, Math.max(0, decimals));
             return {
               tokenId: t.token_id,
               symbol: info.symbol,
               name: info.name,
               balance,
-              decimals: info.decimals,
+              decimals,
               balanceFormatted,
-            };
+            } satisfies TokenBalance;
           }),
       );
+      const tokens: TokenBalance[] = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
 
       const allocations = buildAllocations(hbarFormatted, tokens);
 

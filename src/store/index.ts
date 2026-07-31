@@ -127,6 +127,63 @@ export class AppStore {
       this.state.account = null;
     });
   }
+
+  /**
+   * Wipe runs / proposals / durable events for a profile so the workspace can
+   * start a fresh conversation without deleting the custody session itself.
+   */
+  clearProfileSession(profileId: string): { clearedRuns: number; clearedTrades: number; clearedEvents: number } {
+    const profile = this.getProfile(profileId);
+    if (!profile) throw new Error("Profile not found");
+    let clearedRuns = 0;
+    let clearedTrades = 0;
+    let clearedEvents = 0;
+    this.commit("session.cleared", { profileId }, () => {
+      const runIds = new Set(
+        this.state.runs
+          .filter((run) => run.profileId === profileId)
+          .map((run) => run.id),
+      );
+      clearedRuns = runIds.size;
+      this.state.runs = this.state.runs.filter((run) => !runIds.has(run.id));
+      for (const runId of runIds) {
+        this.db.prepare("DELETE FROM runs WHERE id=?").run(runId);
+      }
+      const beforeTrades = this.state.pendingTrades.length;
+      this.state.pendingTrades = this.state.pendingTrades.filter((trade) => {
+        const drop = runIds.has(trade.runId);
+        if (drop) this.db.prepare("DELETE FROM proposals WHERE id=?").run(trade.id);
+        return !drop;
+      });
+      clearedTrades = beforeTrades - this.state.pendingTrades.length;
+      const result = this.db.prepare("DELETE FROM events WHERE profile_id=?").run(profileId);
+      clearedEvents = Number(result.changes ?? 0);
+      // Also drop legacy unscoped events tied to cleared runs.
+      for (const runId of runIds) {
+        clearedEvents += Number(this.db.prepare("DELETE FROM events WHERE run_id=?").run(runId).changes ?? 0);
+      }
+    }, { profileId });
+    return { clearedRuns, clearedTrades, clearedEvents };
+  }
+
+  /** Remove a paused/non-active custody profile from the session list. */
+  removeProfile(profileId: string): boolean {
+    const profile = this.getProfile(profileId);
+    if (!profile) return false;
+    if (profile.status === "active") throw new Error("Pause or clear the active session before removing it");
+    if (profile.id === "agent-managed" || profile.kind === "agent_managed") {
+      throw new Error("The agent treasury session cannot be removed");
+    }
+    this.clearProfileSession(profileId);
+    this.commit("profile.removed", { profileId }, () => {
+      this.state.profiles = (this.state.profiles ?? []).filter((item) => item.id !== profileId && !(item.id === "connected-wallet" && item.accountId === profile.accountId));
+      this.state.mandates = (this.state.mandates ?? []).filter((mandate) => mandate.profileId !== profileId);
+      this.db.prepare("DELETE FROM profiles WHERE id=?").run(profileId);
+      this.db.prepare("DELETE FROM mandates WHERE profile_id=?").run(profileId);
+      if (this.state.activeProfileId === profileId) this.state.activeProfileId = null;
+    });
+    return true;
+  }
   setActiveProfileId(profileId: string | null): void {
     this.commit("session.active_changed", { profileId }, () => {
       this.state.activeProfileId = profileId;
@@ -137,7 +194,15 @@ export class AppStore {
     this.commit("schedule.updated", next, () => { this.state.schedule = next; this.db.prepare("INSERT INTO schedules(id,value,updated_at) VALUES('default',?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(stringify(next), this.now().toISOString()); });
     return this.getState().schedule;
   }
-  addRun(run: AgentMultiRunRecord, profileId?: string): void { this.commit("run.created", run, () => { this.state.runs.unshift(run); this.state.runs = this.state.runs.slice(0, 500); this.db.prepare("INSERT OR REPLACE INTO runs(id,account_id,status,value,updated_at) VALUES(?,?,?,?,?)").run(run.id, run.accountId, run.status, stringify(run), this.now().toISOString()); }, { runId: run.id, profileId }); }
+  addRun(run: AgentMultiRunRecord, profileId?: string): void {
+    const scoped = profileId ? { ...run, profileId } : run;
+    this.commit("run.created", scoped, () => {
+      this.state.runs.unshift(scoped);
+      this.state.runs = this.state.runs.slice(0, 500);
+      this.db.prepare("INSERT OR REPLACE INTO runs(id,account_id,status,value,updated_at) VALUES(?,?,?,?,?)")
+        .run(scoped.id, scoped.accountId, scoped.status, stringify(scoped), this.now().toISOString());
+    }, { runId: scoped.id, profileId });
+  }
   updateRun(runId: string, update: Partial<AgentMultiRunRecord>, profileId?: string): void { const index = this.state.runs.findIndex((run) => run.id === runId); if (index < 0) return; const next = { ...this.state.runs[index]!, ...update }; this.commit("run.updated", next, () => { this.state.runs[index] = next; this.db.prepare("INSERT OR REPLACE INTO runs(id,account_id,status,value,updated_at) VALUES(?,?,?,?,?)").run(next.id, next.accountId, next.status, stringify(next), this.now().toISOString()); }, { runId, profileId }); }
   addPendingTrade(trade: PendingTrade, profileId?: string): void { this.commit("trade.awaiting_approval", trade, () => { this.state.pendingTrades.unshift(trade); this.db.prepare("INSERT OR REPLACE INTO proposals(id,run_id,account_id,status,value,updated_at) VALUES(?,?,?,?,?,?)").run(trade.id, trade.runId, trade.accountId, trade.status, stringify(trade), this.now().toISOString()); }, { runId: trade.runId, profileId }); }
   updatePendingTrade(tradeId: string, update: Partial<PendingTrade>, profileId?: string): PendingTrade | null { const index = this.state.pendingTrades.findIndex((trade) => trade.id === tradeId); if (index < 0) return null; const next = { ...this.state.pendingTrades[index]!, ...update, evaluatedAt: this.now().toISOString() }; this.commit(`trade.${next.status}`, next, () => { this.state.pendingTrades[index] = next; this.db.prepare("INSERT OR REPLACE INTO proposals(id,run_id,account_id,status,value,updated_at) VALUES(?,?,?,?,?,?)").run(next.id, next.runId, next.accountId, next.status, stringify(next), this.now().toISOString()); }, { runId: next.runId, profileId }); return next; }

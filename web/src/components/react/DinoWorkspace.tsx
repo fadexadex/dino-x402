@@ -24,7 +24,8 @@ import { useAgentDashboard } from "./useAgentDashboard";
 type ChatItem =
   | { type: "user"; id: string; at: number; text: string }
   | { type: "thoughts"; id: string; at: number; sentences: string[]; working: boolean; startedAt: number }
-  | { type: "event"; id: string; at: number; event: AgentEvent };
+  | { type: "event"; id: string; at: number; event: AgentEvent }
+  | { type: "proposal"; id: string; at: number; proposal: ReturnType<typeof toProposal> };
 
 /** Locked-in scroll style for the workspace rail. */
 const WORKSPACE_SCROLL = "scroll-snap-cards scroll-fade";
@@ -44,7 +45,6 @@ export function DinoWorkspace() {
   const [sessionBusy, setSessionBusy] = useState(false);
   const [localUserMessages, setLocalUserMessages] = useState<Array<{ id: string; at: number; text: string }>>([]);
   const [thoughtStartedAt, setThoughtStartedAt] = useState<number | null>(null);
-  const proposalVariant = useVariant("proposal");
   const rightNowPlacement = useVariant("rightNow");
   const graphPlacement = useVariant("graphPlacement");
   const [railOpen, setRailOpen] = useState(true);
@@ -154,6 +154,34 @@ export function DinoWorkspace() {
       setSessionBusy(false);
     }
   };
+  const clearSession = async (profileId: string) => {
+    setSessionBusy(true);
+    setSendError(null);
+    try {
+      await api.clearSession(profileId);
+      setLocalUserMessages([]);
+      setFocusId(null);
+      setInspector(null);
+      await refresh();
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : "Could not clear this session.");
+    } finally {
+      setSessionBusy(false);
+    }
+  };
+  const removeSession = async (profileId: string) => {
+    setSessionBusy(true);
+    setSendError(null);
+    try {
+      await api.removeSession(profileId);
+      if (profileId === profile?.id) setLocalUserMessages([]);
+      await refresh();
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : "Could not remove this session.");
+    } finally {
+      setSessionBusy(false);
+    }
+  };
   const run = {
     events: latestRunEvents.filter((event) => !isStreamMetaKind(event.kind ?? "") && !isConclusionKind(event.kind ?? "")),
     ticks: data?.graph?.ticks?.map((tick) => ({ ...tick, provenance: tick.provenance === "stale" ? "fallback" as const : tick.provenance })) ?? [],
@@ -165,26 +193,56 @@ export function DinoWorkspace() {
     disconnect: () => void disconnectSession(),
     approve: async () => {
       if (!proposal || approving) return;
+      const proposalId = proposal.id;
       setApproving(true);
       setSendError(null);
+      let confirmed = false;
       try {
-        const result = await api.approve(proposal.id);
+        if (!walletConfig.enabled) {
+          throw new Error("WalletConnect is not configured (PUBLIC_REOWN_PROJECT_ID). Reconnect from /connect after setting it.");
+        }
+        // Re-pair on the existing WC Core (never re-init — that breaks proposal keys).
+        setSendError("Pair HashPack in the WalletConnect modal…");
+        try {
+          const needed = profile?.accountId;
+          const paired = await connectWallet({ force: true });
+          if (needed && paired !== needed) {
+            throw new Error(`Connected ${paired}, but this proposal needs ${needed}. Pair the correct account.`);
+          }
+        } catch (err) {
+          throw new Error(err instanceof Error ? err.message : "Could not open WalletConnect. Is HashPack unlocked?");
+        }
+        const result = await api.approve(proposalId);
         if (result?.status === "needs_wallet_signature") {
           if (!result.signing || !result.accountId) {
             throw new Error("Server asked for a wallet signature but did not return signing details.");
           }
-          setSendError("Opening your wallet — approve the association / spend / swap prompts to finish.");
-          const { transactionId } = await signAndExecuteSwap(result.accountId, result.signing);
-          await api.confirmProposal(proposal.id, transactionId);
+          setSendError("Approve the HashPack prompt(s) — keep this tab open until it finishes.");
+          // Reuse the pairing from above — do not force a second modal.
+          const { transactionId } = await signAndExecuteSwap(result.accountId, result.signing, { reuseSession: true });
+          await api.confirmProposal(proposalId, transactionId);
+          confirmed = true;
           setSendError(null);
         } else if (result?.status && result.status !== "approved") {
           throw new Error(result.message || `Unexpected approve status: ${result.status}`);
+        } else {
+          confirmed = true;
         }
       } catch (err) {
-        setSendError(err instanceof Error ? err.message : "Could not approve the trade in your wallet.");
+        const message = err instanceof Error ? err.message : "Could not approve the trade in your wallet.";
+        setSendError(
+          /no matching key|failed to process an inbound message|session topic|without any listeners|relay\/key desync|lost the session/i.test(message)
+            ? "WalletConnect dropped the response (relay desync). Click Approve again and re-pair when the modal opens — leave this tab open until HashPack completes."
+            : /user rejected|denied|closed|cancel/i.test(message)
+              ? "Wallet prompt was closed or rejected. Click Approve in wallet again when ready."
+            : message,
+        );
       } finally {
         setApproving(false);
-        await refresh();
+        // Refresh after success, or lightly after failure so a still-pending
+        // proposal stays in chat (server no longer auto-executes user-wallet trades).
+        if (confirmed) await refresh();
+        else await refresh().catch(() => undefined);
       }
     },
     decline: async () => {
@@ -242,11 +300,21 @@ export function DinoWorkspace() {
         continue;
       }
       const mapped = mappedById.get(event.id) ?? toEvent(event, receipts);
+      // Older runs echoed the full user prompt under "Check-in started" — drop that echo.
+      const detailKey = (mapped.detail ?? "").trim().toLowerCase();
+      const echoesUser =
+        Boolean(detailKey)
+        && (serverUserTexts.has(detailKey)
+          || localUserMessages.some((message) => message.text.trim().toLowerCase() === detailKey));
+      const eventForChat =
+        event.kind === "run.triggered" && echoesUser
+          ? { ...mapped, detail: undefined }
+          : mapped;
       items.push({
         type: "event",
         id: event.id,
         at: event.occurredAt ? new Date(event.occurredAt).getTime() : Date.now(),
-        event: mapped,
+        event: eventForChat,
       });
       if (event.kind === "run.completed" && event.runId && !emittedThoughtRuns.has(event.runId)) {
         const sentences = thoughtsByRun.get(event.runId) ?? [];
@@ -263,9 +331,21 @@ export function DinoWorkspace() {
         }
       }
     }
+    // Approval lives in the chat stream under the latest activity — not pinned above the fold.
+    if (proposal && awaiting) {
+      const mapped = toProposal(proposal);
+      const expiresMs = mapped.expiresAt ? new Date(mapped.expiresAt).getTime() : NaN;
+      items.push({
+        type: "proposal",
+        id: `proposal-${proposal.id}`,
+        // Stable sort key so Approve re-renders don't shove the card around.
+        at: Number.isFinite(expiresMs) ? expiresMs - 600_000 : (items.at(-1)?.at ?? Date.now()) + 1,
+        proposal: mapped,
+      });
+    }
     // Live thinking lives in the Right now rail — avoid a second blank Thinking card in chat.
     return items.sort((a, b) => a.at - b.at);
-  }, [localUserMessages, serverUserTexts, rawEvents, receipts, baseEvents, thoughtRunId]);
+  }, [localUserMessages, serverUserTexts, rawEvents, receipts, baseEvents, thoughtRunId, proposal, awaiting]);
 
   useEffect(() => {
     if (working && thoughtStartedAt === null) setThoughtStartedAt(Date.now());
@@ -313,15 +393,14 @@ export function DinoWorkspace() {
   }, []);
 
 
-  const proposalEvent = run.events.find((e) => e.proposal);
   const lastCheckIn = run.events.at(-1)?.at ?? Date.now();
 
-  // keep the stream pinned to the newest step unless the user scrolled up
+  // keep the stream pinned to the newest step (and approval card) unless the user scrolled up
   useEffect(() => {
     const el = streamRef.current;
     if (!el || !stickToBottom.current) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [chatItems.length, thoughtSentences.length, run.phase]);
+  }, [chatItems.length, thoughtSentences.length, run.phase, awaiting]);
 
   const onStreamScroll = () => {
     const el = streamRef.current;
@@ -432,6 +511,8 @@ export function DinoWorkspace() {
           onActivate={(profileId) => activateSession(profileId)}
           onDisconnect={() => disconnectSession()}
           onNewSession={() => { window.location.href = "/connect?new=1"; }}
+          onClearSession={(profileId) => clearSession(profileId)}
+          onRemoveSession={(profileId) => removeSession(profileId)}
         />
         <div className="ml-auto flex items-center gap-2">
           <WatchStatus
@@ -484,7 +565,18 @@ export function DinoWorkspace() {
                 className={`-mr-1 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overscroll-contain scroll-smooth pr-1 ${WORKSPACE_SCROLL}`}
               >
                 {rightNowPlacement === "Left rail" && rightNowCard}
-                <RunsRail pendingCount={awaiting ? 1 : 0} holdings={toHoldings(data?.portfolio)} objective={data?.mandate?.objective} runs={(data?.runs ?? []).slice(0, 5).map((item) => ({ id: item.id, label: item.objective ?? "Portfolio check-in", status: item.status ?? "Recorded", tone: item.status === "failed" ? "orange" : item.status === "completed" ? "green" : item.status === "waiting_approval" ? "orange" : "muted" }))} />
+                <RunsRail
+                  pendingCount={awaiting ? 1 : 0}
+                  holdings={toHoldings(data?.portfolio)}
+                  loadingHoldings={loading && !data?.portfolio}
+                  objective={data?.mandate?.objective}
+                  runs={(data?.runs ?? []).slice(0, 5).map((item) => ({
+                    id: item.id,
+                    label: item.objective ?? "Portfolio check-in",
+                    status: item.status ?? "Recorded",
+                    tone: item.status === "failed" ? "orange" : item.status === "completed" ? "green" : item.status === "waiting_approval" ? "orange" : "muted",
+                  }))}
+                />
               </div>
             </div>
 
@@ -546,34 +638,28 @@ export function DinoWorkspace() {
 
                   {/* Mobile holdings strip — desktop uses the left rail. */}
                   <section className="rounded-lg border border-line bg-card p-3 lg:hidden">
-                    <p className="text-[10.5px] font-medium tracking-[0.09em] text-ink-3 uppercase">Holdings</p>
+                    <div className="flex items-baseline justify-between gap-2">
+                      <p className="text-[10.5px] font-medium tracking-[0.09em] text-ink-3 uppercase">Balances</p>
+                      <p className="text-[10.5px] text-ink-3">token qty</p>
+                    </div>
                     <ul className="mt-2 grid grid-cols-3 gap-2">
                       {toHoldings(data?.portfolio).slice(0, 3).map((holding) => (
                         <li key={holding.asset} className="min-w-0">
-                          <p className="text-[11px] text-ink-2">{holding.asset}</p>
-                          <p className="truncate font-mono text-[12px] text-ink tabular-nums">{holding.amount.toFixed(holding.asset === "HBAR" ? 2 : 2)}</p>
+                          <p className="text-[11px] font-medium text-ink">{holding.asset}</p>
+                          <p className="truncate font-mono text-[12px] text-ink-2 tabular-nums">
+                            {holding.amount.toFixed(holding.asset === "HBAR" ? 2 : 2)}
+                          </p>
                         </li>
                       ))}
                       {toHoldings(data?.portfolio).length === 0 && (
-                        <li className="col-span-3 text-[12px] text-ink-3">No live balances yet.</li>
+                        <li className="col-span-3 text-[12px] text-ink-3">
+                          {loading ? "Loading balances…" : "No live balances yet."}
+                        </li>
                       )}
                     </ul>
                   </section>
 
                   {(error || sendError) && <section role="alert" className="rounded-lg border border-orange/30 bg-orange-soft p-3 text-[12px] text-orange">{sendError ?? error}</section>}
-                  {awaiting && proposal && (
-                    <section className="rounded-lg border border-orange/30 bg-card p-4">
-                      <p className="text-[10.5px] font-medium tracking-[0.09em] text-orange uppercase">Needs your approval</p>
-                      <div className="mt-2">
-                        <ProposalGate
-                          proposal={toProposal(proposal)}
-                          busy={approving}
-                          onApprove={() => void run.approve()}
-                          onDecline={() => void run.decline()}
-                        />
-                      </div>
-                    </section>
-                  )}
                   {!run.connected && (
                     <section className="rounded-lg border border-line bg-card p-5 text-center">
                       <p className="text-[14px] font-medium text-ink">
@@ -614,6 +700,21 @@ export function DinoWorkspace() {
                     {chatItems.map((item) => {
                       if (item.type === "user") {
                         return <UserMessage key={item.id} text={item.text} at={item.at} />;
+                      }
+                      if (item.type === "proposal") {
+                        return (
+                          <div key={item.id} className="scroll-mt-24">
+                            <p className="mb-1.5 text-[10.5px] font-medium tracking-[0.09em] text-orange uppercase">
+                              Needs your approval
+                            </p>
+                            <ProposalGate
+                              proposal={item.proposal}
+                              busy={approving}
+                              onApprove={() => void run.approve()}
+                              onDecline={() => void run.decline()}
+                            />
+                          </div>
+                        );
                       }
                       if (item.type === "thoughts") {
                         // Live thoughts render in Right now; chat only keeps completed-run traces.
@@ -730,13 +831,6 @@ export function DinoWorkspace() {
       )}
 
 
-      {awaiting && proposalEvent?.proposal && proposalVariant === "Takeover" && (
-        <ProposalGate
-          proposal={proposalEvent.proposal}
-          onApprove={() => void run.approve()}
-          onDecline={() => void run.decline()}
-        />
-      )}
     </div>
   );
 }

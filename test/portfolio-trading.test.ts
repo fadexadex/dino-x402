@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readPortfolio } from "../src/portfolio/reader.js";
-import { mergeLivePortfolioValuation, pricesUsdFromPortfolio, proposeBandRebalance, validateAllocationBands, valuePortfolio } from "../src/portfolio/allocation.js";
+import { mergeLivePortfolioValuation, pricesUsdFromPortfolio, proposeBandRebalance, proposeRequestedTrade, validateAllocationBands, valuePortfolio } from "../src/portfolio/allocation.js";
 import { TradePolicy } from "../src/trading/policy.js";
 import { buildExactInputTransaction, encodeV2Path, minimumOutput, quoteSaucerExactInput, resolveAccountEvmAddress, resolveSaucerRoute } from "../src/trading/saucerswap.js";
 import { verifyMirrorSwap } from "../src/trading/verification.js";
@@ -118,6 +118,64 @@ describe("live portfolio and deterministic allocation", () => {
     ]);
     expect(candidate.action).toBe("hold");
     expect(candidate.reason).toContain("Current mix:");
+  });
+
+  it("marks live balances with display USD prices before any paid run", () => {
+    const live = {
+      accountId: "0.0.1",
+      hbarBalance: 0n,
+      hbarFormatted: 100,
+      tokens: [],
+      allocations: [
+        { symbol: "HBAR", balanceFormatted: 100, usdValue: 0, allocationPct: 0 },
+        { symbol: "USDC", balanceFormatted: 50, usdValue: 0, allocationPct: 0 },
+      ],
+      fetchedAt: "2026-07-31T12:00:00.000Z",
+      provenance: "live" as const,
+    };
+    const unmarked = mergeLivePortfolioValuation(live);
+    expect(unmarked.valued).toBe(false);
+    const marked = mergeLivePortfolioValuation(live, undefined, { HBAR: 0.07, USDC: 1 }, "display:live");
+    expect(marked.valued).toBe(true);
+    expect(marked.totalUsd).toBeCloseTo(57);
+    expect(marked.assets.find((asset) => asset.symbol === "HBAR")?.usdValue).toBeCloseTo(7);
+  });
+
+  it("still proposes a trade when the user asked even if hard bands hold", () => {
+    const bands = [
+      { symbol: "HBAR" as const, minPct: 25, targetPct: 34, maxPct: 45 },
+      { symbol: "USDC" as const, minPct: 25, targetPct: 33, maxPct: 45 },
+      { symbol: "SAUCE" as const, minPct: 10, targetPct: 33, maxPct: 40 },
+    ];
+    const allocations = [
+      { symbol: "HBAR", balanceFormatted: 34.8, usdValue: 34.8, allocationPct: 34.8 },
+      { symbol: "USDC", balanceFormatted: 36.7, usdValue: 36.7, allocationPct: 36.7 },
+      { symbol: "SAUCE", balanceFormatted: 28.6, usdValue: 28.6, allocationPct: 28.6 },
+    ];
+    expect(proposeBandRebalance(allocations, bands).action).toBe("hold");
+    const requested = proposeRequestedTrade(allocations, bands);
+    expect(requested).toMatchObject({ action: "swap", fromSymbol: "USDC", toSymbol: "SAUCE" });
+    expect(requested.reason).toMatch(/asked for a trade/i);
+  });
+
+  it("honors an explicit user pair over soft band drift", () => {
+    const bands = [
+      { symbol: "HBAR" as const, minPct: 25, targetPct: 34, maxPct: 45 },
+      { symbol: "USDC" as const, minPct: 25, targetPct: 33, maxPct: 45 },
+      { symbol: "SAUCE" as const, minPct: 10, targetPct: 33, maxPct: 40 },
+    ];
+    const allocations = [
+      { symbol: "HBAR", balanceFormatted: 34.8, usdValue: 34.8, allocationPct: 34.8 },
+      { symbol: "USDC", balanceFormatted: 36.7, usdValue: 36.7, allocationPct: 36.7 },
+      { symbol: "SAUCE", balanceFormatted: 28.6, usdValue: 28.6, allocationPct: 28.6 },
+    ];
+    const requested = proposeRequestedTrade(allocations, bands, {
+      fromSymbol: "HBAR",
+      toSymbol: "USDC",
+      reason: "You asked to swap HBAR into USDC.",
+      force: true,
+    });
+    expect(requested).toMatchObject({ action: "swap", fromSymbol: "HBAR", toSymbol: "USDC" });
   });
 });
 

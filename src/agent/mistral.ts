@@ -28,13 +28,27 @@ const safeReason = (error: unknown): string => {
   return "Mistral returned an unusable response";
 };
 
+export type RunPlan = {
+  symbols: Array<"HBAR" | "USDC" | "SAUCE">;
+  wantTrade: boolean;
+  fromSymbol?: "HBAR" | "USDC" | "SAUCE";
+  toSymbol?: "HBAR" | "USDC" | "SAUCE";
+  thoughts: string[];
+  reason: string;
+  source: "mistral" | "deterministic";
+};
+
 export class MistralAdvisor {
   constructor(private readonly config: MistralConfig) {}
 
-  private async complete(system: string, user: string): Promise<Record<string, unknown>> {
+  private async complete(
+    system: string,
+    user: string,
+    options: { temperature?: number; timeoutMs?: number } = {},
+  ): Promise<Record<string, unknown>> {
     if (!this.config.apiKey) throw new Error("Mistral is not configured");
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 12_000);
+    const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 12_000);
     try {
       const response = await fetch("https://api.mistral.ai/v1/chat/completions", {
         method: "POST",
@@ -44,7 +58,7 @@ export class MistralAdvisor {
         },
         body: JSON.stringify({
           model: this.config.model,
-          temperature: 0.1,
+          temperature: options.temperature ?? 0.1,
           response_format: { type: "json_object" },
           messages: [
             { role: "system", content: system },
@@ -67,6 +81,127 @@ export class MistralAdvisor {
       return parseObject(text);
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  /**
+   * Free-form first-person thoughts for the left-rail stream. Prefer model voice
+   * over hardcoded ritual lines; fall back only when Mistral is unavailable.
+   */
+  async narrate(args: {
+    stage: string;
+    objective: string;
+    facts: Record<string, unknown>;
+    fallback: string[];
+  }): Promise<string[]> {
+    try {
+      const result = await this.complete(
+        "You are Dino, a Hedera portfolio agent thinking out loud. Return JSON: thoughts (array of 1-4 short first-person lines). Sound natural and specific to the facts — never invent prices, never claim a trade settled, never use boilerplate like \"bands are satisfied\". Vary wording across stages.",
+        JSON.stringify({ stage: args.stage, objective: args.objective, facts: args.facts }),
+        { temperature: 0.55, timeoutMs: 10_000 },
+      );
+      const thoughts = Array.isArray(result.thoughts)
+        ? result.thoughts.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        : [];
+      if (!thoughts.length) throw new Error("Empty narrate");
+      return thoughts.slice(0, 4).map((item) => item.slice(0, 280));
+    } catch {
+      return args.fallback.slice(0, 4);
+    }
+  }
+
+  /**
+   * Decide what this run should do next — which paid symbols to buy and whether
+   * a swap should be prepared. Policy/signing stay outside the model.
+   */
+  async planRun(args: {
+    objective: string;
+    intent: "research" | "advise" | "act";
+    mode: number;
+    focusSymbol?: string;
+    directedPair?: { fromSymbol: string; toSymbol: string };
+    holdings: Array<{ symbol: string; balanceFormatted: number }>;
+    allowTrade: boolean;
+  }): Promise<RunPlan> {
+    const assets = ["HBAR", "USDC", "SAUCE"] as const;
+    const clampSymbols = (raw: unknown): Array<"HBAR" | "USDC" | "SAUCE"> => {
+      const list = Array.isArray(raw) ? raw : [];
+      const picked = list
+        .map((item) => String(item).toUpperCase())
+        .filter((item): item is "HBAR" | "USDC" | "SAUCE" => assets.includes(item as typeof assets[number]));
+      return [...new Set(picked)];
+    };
+    const fallback = (): RunPlan => {
+      if (args.directedPair) {
+        return {
+          symbols: [args.directedPair.fromSymbol, args.directedPair.toSymbol] as Array<"HBAR" | "USDC" | "SAUCE">,
+          wantTrade: args.allowTrade,
+          fromSymbol: args.directedPair.fromSymbol as "HBAR" | "USDC" | "SAUCE",
+          toSymbol: args.directedPair.toSymbol as "HBAR" | "USDC" | "SAUCE",
+          thoughts: [
+            `You asked for ${args.directedPair.fromSymbol} → ${args.directedPair.toSymbol}; I'll buy just those legs and prepare an approval.`,
+          ],
+          reason: "Honor the directed swap pair from the user message.",
+          source: "deterministic",
+        };
+      }
+      if (args.intent === "research" && args.focusSymbol && assets.includes(args.focusSymbol as typeof assets[number])) {
+        return {
+          symbols: [args.focusSymbol as "HBAR" | "USDC" | "SAUCE"],
+          wantTrade: false,
+          thoughts: [`Focusing paid reads on ${args.focusSymbol} for this research ask.`],
+          reason: "Research focus sleeve only.",
+          source: "deterministic",
+        };
+      }
+      return {
+        symbols: [...assets],
+        wantTrade: args.allowTrade,
+        thoughts: [
+          args.allowTrade
+            ? "I'll pull paid tape for the book, then pick a concrete small swap for your approval."
+            : "I'll pull paid tape and answer from the market context — no executable order.",
+        ],
+        reason: "Default full-book check-in.",
+        source: "deterministic",
+      };
+    };
+
+    if (args.directedPair) return fallback();
+
+    try {
+      const result = await this.complete(
+        "You are Dino planning a Hedera portfolio check-in. Decide the flow — do NOT invent prices or claim execution. Return JSON: symbols (subset of HBAR|USDC|SAUCE to buy paid CoinGecko for), wantTrade (boolean), optional fromSymbol/toSymbol if you already lean toward a pair, thoughts (2-4 first-person planning lines), reason (one short sentence). Rules: research → wantTrade false; advise → wantTrade false; act + mode>=3 → wantTrade true when a small swap makes sense; never require all three symbols unless the ask is a full-book rebalance; if focusSymbol is set prefer including it.",
+        JSON.stringify(args),
+        { temperature: 0.45, timeoutMs: 14_000 },
+      );
+      let symbols = clampSymbols(result.symbols);
+      if (!symbols.length) symbols = fallback().symbols;
+      if (args.focusSymbol && assets.includes(args.focusSymbol as typeof assets[number]) && !symbols.includes(args.focusSymbol as typeof assets[number])) {
+        symbols = [...symbols, args.focusSymbol as "HBAR" | "USDC" | "SAUCE"];
+      }
+      const wantTrade = args.allowTrade && Boolean(result.wantTrade);
+      const fromSymbol = typeof result.fromSymbol === "string" && assets.includes(result.fromSymbol.toUpperCase() as typeof assets[number])
+        ? result.fromSymbol.toUpperCase() as "HBAR" | "USDC" | "SAUCE"
+        : undefined;
+      const toSymbol = typeof result.toSymbol === "string" && assets.includes(result.toSymbol.toUpperCase() as typeof assets[number])
+        ? result.toSymbol.toUpperCase() as "HBAR" | "USDC" | "SAUCE"
+        : undefined;
+      const thoughts = Array.isArray(result.thoughts)
+        ? result.thoughts.filter((item): item is string => typeof item === "string")
+        : [];
+      const reason = typeof result.reason === "string" ? result.reason.trim() : "Planned by Mistral.";
+      if (!thoughts.length) throw new Error("planRun missing thoughts");
+      return {
+        symbols,
+        wantTrade: args.intent === "research" || args.intent === "advise" || args.mode < 3 ? false : wantTrade,
+        ...(fromSymbol && toSymbol && fromSymbol !== toSymbol ? { fromSymbol, toSymbol } : {}),
+        thoughts: thoughts.slice(0, 4).map((item) => item.slice(0, 280)),
+        reason: reason.slice(0, 280),
+        source: "mistral",
+      };
+    } catch {
+      return fallback();
     }
   }
 
@@ -182,8 +317,9 @@ export class MistralAdvisor {
 
     try {
       const result = await this.complete(
-        "You are Dino, a concise Hedera portfolio agent. Answer the user's objective using ONLY the supplied paid insights, allocations, and band candidate. Return JSON: summary (string, 1-3 sentences, plain English), thoughts (array of 3-6 short first-person reasoning lines), bullets (array of 2-4 short facts). If intent is research, do not recommend executing a trade. Do not invent prices.",
+        "You are Dino, a concise Hedera portfolio agent. Answer the user's objective using ONLY the supplied paid insights, allocations, and band candidate. Return JSON: summary (string, 1-3 sentences, plain English), thoughts (array of 3-6 short first-person reasoning lines), bullets (array of 2-4 short facts). If intent is research, do not recommend executing a trade. If intent is act and candidate.action is swap, say you prepared that swap for approval — do not claim bands block the trade. Do not invent prices. Vary phrasing; avoid ritual scripts.",
         JSON.stringify(args),
+        { temperature: 0.4 },
       );
       const summary = typeof result.summary === "string" ? result.summary.trim() : "";
       const thoughts = Array.isArray(result.thoughts) ? result.thoughts.filter((item): item is string => typeof item === "string") : [];
@@ -193,6 +329,60 @@ export class MistralAdvisor {
         summary: summary.slice(0, 500),
         thoughts: thoughts.slice(0, 6).map((item) => item.slice(0, 280)),
         bullets: bullets.slice(0, 4).map((item) => item.slice(0, 240)),
+      };
+    } catch {
+      return fallback();
+    }
+  }
+
+  /**
+   * When the user asks to trade in Mode 3/4, let the model pick a concrete
+   * HBAR/USDC/SAUCE pair using paid tape — not only band math.
+   */
+  async pickTrade(args: {
+    objective: string;
+    insights: Array<{
+      symbol: string;
+      price?: number;
+      change24hPercent?: number;
+      volume24hUsd?: number;
+    }>;
+    allocations: Array<{ symbol: string; allocationPct: number; usdValue: number; balanceFormatted: number }>;
+    focusSymbol?: string;
+  }): Promise<{ fromSymbol: "HBAR" | "USDC" | "SAUCE"; toSymbol: "HBAR" | "USDC" | "SAUCE"; reason: string } | null> {
+    const symbols = ["HBAR", "USDC", "SAUCE"] as const;
+    const funded = args.allocations.filter((item) => item.balanceFormatted > 0 && item.usdValue > 0);
+    if (funded.length < 1) return null;
+    const fallback = (): { fromSymbol: "HBAR" | "USDC" | "SAUCE"; toSymbol: "HBAR" | "USDC" | "SAUCE"; reason: string } => {
+      const from = (funded.find((item) => item.symbol === "HBAR")
+        ?? funded.find((item) => item.symbol === "USDC")
+        ?? funded[0])!;
+      const toSymbol = (symbols.find((symbol) => symbol !== from.symbol && (args.focusSymbol ? symbol === args.focusSymbol : symbol === "USDC" || symbol === "SAUCE"))
+        ?? symbols.find((symbol) => symbol !== from.symbol)
+        ?? "USDC") as "HBAR" | "USDC" | "SAUCE";
+      return {
+        fromSymbol: from.symbol.toUpperCase() as "HBAR" | "USDC" | "SAUCE",
+        toSymbol,
+        reason: `You asked for a sample trade — preparing a small ${from.symbol} → ${toSymbol} swap from the paid tape for your approval.`,
+      };
+    };
+    try {
+      const result = await this.complete(
+        "You are Dino on Hedera testnet. The user explicitly asked to trade / try a sample swap. Pick ONE small swap among HBAR, USDC, SAUCE using ONLY the supplied paid prices and balances. Prefer a liquid pair (HBAR↔USDC or into an underweight sleeve). Return JSON: fromSymbol, toSymbol, reason (one short sentence). Never invent symbols. fromSymbol must have balance > 0.",
+        JSON.stringify(args),
+      );
+      const fromSymbol = String(result.fromSymbol ?? "").toUpperCase();
+      const toSymbol = String(result.toSymbol ?? "").toUpperCase();
+      const reason = typeof result.reason === "string" ? result.reason.trim() : "";
+      if (!symbols.includes(fromSymbol as typeof symbols[number]) || !symbols.includes(toSymbol as typeof symbols[number]) || fromSymbol === toSymbol || !reason) {
+        throw new Error("Invalid pickTrade schema");
+      }
+      const from = args.allocations.find((item) => item.symbol.toUpperCase() === fromSymbol);
+      if (!from || from.balanceFormatted <= 0) throw new Error("fromSymbol has no balance");
+      return {
+        fromSymbol: fromSymbol as "HBAR" | "USDC" | "SAUCE",
+        toSymbol: toSymbol as "HBAR" | "USDC" | "SAUCE",
+        reason: reason.slice(0, 280),
       };
     } catch {
       return fallback();

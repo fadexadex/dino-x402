@@ -11,7 +11,23 @@ function shortStatus(status: string): string {
   return status;
 }
 
-export function RunsRail({ pendingCount, holdings = [], objective, runs = [] }: { pendingCount: number; holdings?: Holding[]; objective?: string; runs?: RunItem[] }) {
+function qtyDigits(asset: string): number {
+  return asset === "HBAR" ? 4 : asset === "SAUCE" ? 2 : 2;
+}
+
+export function RunsRail({
+  pendingCount,
+  holdings = [],
+  objective,
+  runs = [],
+  loadingHoldings = false,
+}: {
+  pendingCount: number;
+  holdings?: Holding[];
+  objective?: string;
+  runs?: RunItem[];
+  loadingHoldings?: boolean;
+}) {
   const total = holdings.reduce((sum, holding) => sum + holding.usd, 0);
   const valued = total > 0;
   return (
@@ -23,23 +39,46 @@ export function RunsRail({ pendingCount, holdings = [], objective, runs = [] }: 
         <p className="mt-1.5 break-words text-[12px] leading-relaxed text-ink-2">{objective || "No objective configured yet."}</p>
         <div className="mt-2.5 border-t border-line pt-2.5">
           <div className="flex items-baseline justify-between gap-2">
-            <span className="text-[11.5px] text-ink-3">Portfolio</span>
+            <span className="text-[11.5px] text-ink-3">Balances</span>
             <span className="font-mono text-[13px] font-medium text-ink tabular-nums">
-              {valued ? usd(total) : holdings.length ? "Unvalued" : usd(0)}
+              {loadingHoldings && holdings.length === 0
+                ? "…"
+                : valued
+                  ? usd(total)
+                  : holdings.length
+                    ? "No USD yet"
+                    : usd(0)}
             </span>
           </div>
-          {!valued && holdings.length > 0 && (
-            <p className="mt-1 text-[10.5px] leading-snug text-ink-3">Live balances below. USD appears after a paid intelligence run.</p>
+          <p className="mt-1 text-[10.5px] leading-snug text-ink-3">
+            {loadingHoldings && holdings.length === 0
+              ? "Fetching token amounts and USD marks…"
+              : valued
+                ? "Qty from Mirror · USD from CoinGecko (USDC pegged $1). HashPack may use a different testnet mark."
+                : holdings.length
+                  ? "Token quantities from Mirror. Waiting on USD marks…"
+                  : "Connect a wallet to load live token amounts."}
+          </p>
+          {holdings.length > 0 && (
+            <div className="mt-2 flex items-baseline justify-between gap-2 text-[10px] tracking-[0.06em] text-ink-3 uppercase">
+              <span>Token</span>
+              <span>{valued ? "Qty · USD" : "Qty"}</span>
+            </div>
           )}
-          <ul className="mt-1.5 grid gap-1">
+          <ul className="mt-1 grid gap-1">
             {holdings.length === 0 ? (
-              <li className="text-[11.5px] text-ink-3">No Mirror balances yet for this account.</li>
+              <li className="text-[11.5px] text-ink-3">
+                {loadingHoldings ? "Loading…" : "No Mirror balances yet for this account."}
+              </li>
             ) : holdings.map((holding) => (
               <li key={holding.asset} className="flex min-w-0 items-baseline justify-between gap-2 text-[11.5px]">
-                <span className="shrink-0 text-ink-2">{holding.asset}</span>
-                <span className="min-w-0 truncate text-right font-mono text-ink-3 tabular-nums">
-                  {num(holding.amount, holding.asset === "HBAR" ? 4 : 2)}
-                  {valued ? ` · ${usd(holding.usd)}` : ""}
+                <span className="shrink-0 font-medium text-ink">{holding.asset}</span>
+                <span
+                  className="min-w-0 truncate text-right font-mono text-ink-2 tabular-nums"
+                  title={`${holding.amount} ${holding.asset}${valued ? ` ≈ ${usd(holding.usd)}` : " (token amount)"}`}
+                >
+                  {num(holding.amount, qtyDigits(holding.asset))}
+                  {valued ? <span className="text-ink-3"> · {usd(holding.usd)}</span> : null}
                 </span>
               </li>
             ))}

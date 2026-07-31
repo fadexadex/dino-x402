@@ -57,14 +57,16 @@ function useStickyPriceDomain(ticks: Tick[]): [number, number] {
 /** Pads a single observation so markers / focus lines from the same run still land on-canvas. */
 const SINGLE_TICK_PAD_MS = 5 * 60_000;
 
-function usePaths(ticks: Tick[], height: number, domainP: [number, number]) {
+function usePaths(ticks: Tick[], height: number, domainP: [number, number], extraTimes: number[] = []) {
   return useMemo(() => {
     if (ticks.length < 1) return null;
-    const xs = ticks.map((d) => d.t);
+    const xs = [...ticks.map((d) => d.t), ...extraTimes.filter((t) => Number.isFinite(t))];
     const rawMin = Math.min(...xs);
     const rawMax = Math.max(...xs);
-    const minT = ticks.length === 1 ? rawMin - SINGLE_TICK_PAD_MS : rawMin;
-    const maxT = ticks.length === 1 ? rawMax + SINGLE_TICK_PAD_MS : rawMax;
+    const span = Math.max(1, rawMax - rawMin);
+    const pad = ticks.length === 1 || span < SINGLE_TICK_PAD_MS ? SINGLE_TICK_PAD_MS : Math.min(span * 0.04, SINGLE_TICK_PAD_MS);
+    const minT = rawMin - pad;
+    const maxT = rawMax + pad;
     const minP = domainP[0];
     const maxP = domainP[1];
     const x = (t: number) => ((t - minT) / Math.max(1, maxT - minT)) * W;
@@ -98,7 +100,7 @@ function usePaths(ticks: Tick[], height: number, domainP: [number, number]) {
     const gaps = ticks.filter((d) => d.provenance === "fallback").map((d) => x(d.t));
 
     return { x, y, segments, areas, gaps, minT, maxT, minP, maxP, single: ticks.length === 1 };
-  }, [ticks, height, domainP]);
+  }, [ticks, height, domainP, extraTimes]);
 }
 
 function CompositionSteps({
@@ -163,12 +165,33 @@ function Frame({
   weights?: Array<{ t: number; weight: number }>;
 }) {
   const domainP = useStickyPriceDomain(ticks);
-  const p = usePaths(ticks.length === 1 ? [ticks[0]!, { ...ticks[0]!, t: ticks[0]!.t + 1 }] : ticks, height, domainP);
+  const extraTimes = useMemo(() => {
+    const times = [
+      ...(focusT != null ? [focusT] : []),
+      ...annotations.map((a) => a.t),
+      ...markers.map((m) => m.t),
+    ];
+    return times.filter((t) => Number.isFinite(t));
+  }, [focusT, annotations, markers]);
+  const p = usePaths(ticks, height, domainP, extraTimes);
   const gid = useId();
   const [hover, setHover] = useState<Tick | null>(null);
   const [brush, setBrush] = useState<{ a: number; b: number } | null>(null);
   const down = useRef<number | null>(null);
   if (!p) return null;
+
+  const nearestTickAt = (t: number) => {
+    let best = ticks[0]!;
+    let bestD = Infinity;
+    for (const tick of ticks) {
+      const d = Math.abs(tick.t - t);
+      if (d < bestD) {
+        bestD = d;
+        best = tick;
+      }
+    }
+    return best;
+  };
 
   const toLocalX = (e: React.PointerEvent<SVGSVGElement> | React.MouseEvent<SVGSVGElement>) => {
     const box = e.currentTarget.getBoundingClientRect();
@@ -334,18 +357,36 @@ function Frame({
           )}
           {showComposition && <CompositionSteps markers={markers} x={p.x} weights={weights} />}
 
-          {focusT != null && focusT >= p.minT && focusT <= p.maxT && (
+          {focusT != null && (
             <g pointerEvents="none">
-              <rect x={p.x(focusT) - 1.5} y={0} width={3} height={H} fill="var(--signal-soft)" />
-              <line
-                x1={p.x(focusT)}
-                x2={p.x(focusT)}
-                y1={0}
-                y2={H}
-                stroke="var(--signal)"
-                strokeWidth="1"
-                vectorEffect="non-scaling-stroke"
-              />
+              {(() => {
+                const clamped = Math.min(p.maxT, Math.max(p.minT, focusT));
+                const fx = p.x(clamped);
+                const focusTick = nearestTickAt(clamped);
+                return (
+                  <>
+                    <rect x={fx - 6} y={0} width={12} height={H} fill="var(--signal-soft)" opacity={0.55} />
+                    <line
+                      x1={fx}
+                      x2={fx}
+                      y1={0}
+                      y2={H}
+                      stroke="var(--signal)"
+                      strokeWidth="1.8"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    <circle
+                      cx={fx}
+                      cy={p.y(focusTick.price)}
+                      r={5.5}
+                      fill="var(--signal)"
+                      stroke="var(--card)"
+                      strokeWidth="2"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  </>
+                );
+              })()}
             </g>
           )}
 
@@ -598,23 +639,55 @@ export function LiveGraph({
   const [fillRef, fillH] = useFillHeight(tall ? 380 : 300);
   const [showWeight, setShowWeight] = useState(false);
 
+  const sortedTicks = useMemo(
+    () => ticks.slice().sort((a, b) => a.t - b.t),
+    [ticks],
+  );
+
+  // When the user jumps to a moment, clear a tight zoom and select the nearest
+  // tick so the tracer + readout both land on that instant.
+  useEffect(() => {
+    if (focusT == null) return;
+    setDomain(null);
+    setRange("all");
+    if (sortedTicks.length === 0) return;
+    let best = sortedTicks[0]!;
+    let bestD = Infinity;
+    for (const tick of sortedTicks) {
+      const d = Math.abs(tick.t - focusT);
+      if (d < bestD) {
+        bestD = d;
+        best = tick;
+      }
+    }
+    setSelected(best);
+  }, [focusT, sortedTicks]);
+
   const view = useMemo(() => {
-    let out = ticks;
+    let out = sortedTicks;
     if (typeof range === "number") {
-      const cut = (ticks[ticks.length - 1]?.t ?? Date.now()) - range;
-      out = ticks.filter((t) => t.t >= cut);
+      const latest = sortedTicks[sortedTicks.length - 1]?.t ?? Date.now();
+      const cut = latest - range;
+      out = sortedTicks.filter((t) => t.t >= cut);
+      // Keep the focused moment visible even if a short range would clip it.
+      if (focusT != null && focusT < cut) {
+        out = sortedTicks.filter((t) => t.t >= focusT - range);
+      }
     }
     if (domain) out = out.filter((t) => t.t >= domain[0] && t.t <= domain[1]);
-    return out.length > 2 ? out : ticks;
-  }, [ticks, domain, range]);
+    return out.length > 0 ? out : sortedTicks;
+  }, [sortedTicks, domain, range, focusT]);
 
   const viewMin = view[0]?.t;
   const viewMax = view[view.length - 1]?.t;
-  const pad = view.length === 1 ? SINGLE_TICK_PAD_MS : 0;
-  const inView = (t: number) =>
-    viewMin !== undefined && viewMax !== undefined && t >= viewMin - pad && t <= viewMax + pad;
-  const vMarkers = markers.filter((m) => inView(m.t));
-  const vAnnotations = annotations.filter((a) => inView(a.t));
+  const pad = view.length <= 1 ? SINGLE_TICK_PAD_MS : Math.min(SINGLE_TICK_PAD_MS, Math.max(1, (viewMax ?? 0) - (viewMin ?? 0)) * 0.04);
+  const inView = (t: number) => {
+    if (viewMin === undefined || viewMax === undefined) return false;
+    if (focusT != null && Math.abs(t - focusT) < 1) return true;
+    return t >= viewMin - pad && t <= viewMax + pad;
+  };
+  const vMarkers = markers.filter((m) => inView(m.t) || (focusT != null && Math.abs(m.t - focusT) < 1));
+  const vAnnotations = annotations.filter((a) => inView(a.t) || (focusT != null && a.t === focusT));
 
   const zoom = (t0: number, t1: number) => setDomain([t0, t1]);
   const zoomed = domain !== null || range !== "all";

@@ -52,7 +52,8 @@ export type PortfolioSnapshot = {
   totalUsd?: string | number;
   assets?: AssetBalance[];
   holdings?: AssetBalance[];
-  provenance?: Provenance;
+  provenance?: Provenance | string;
+  valued?: boolean;
 };
 
 export type MandateLimits = {
@@ -177,13 +178,21 @@ export async function loadDashboard(preferredProfileId?: string | null): Promise
     };
   }
   setPreferredProfileId(profile.id);
-  const [dashboard, graph, receiptResult] = await Promise.all([
+  const [dashboard, graph, receiptResult, portfolioFallback] = await Promise.all([
     request<DashboardSnapshot>(`/profiles/${profile.id}/dashboard`),
     request<DashboardSnapshot["graph"]>(`/profiles/${profile.id}/graph?series=HBAR`).catch(() => undefined),
     request<{ receipts: Receipt[] }>(`/profiles/${profile.id}/receipts`).catch(() => ({ receipts: [] })),
+    // Balances should appear as soon as a wallet session is active — never wait for a chat run.
+    request<PortfolioSnapshot>(`/profiles/${profile.id}/portfolio`).catch(() => undefined),
   ]);
+  const portfolio = dashboard.portfolio?.assets?.length
+    ? dashboard.portfolio
+    : portfolioFallback?.assets?.length
+      ? portfolioFallback
+      : dashboard.portfolio ?? portfolioFallback;
   return {
     ...dashboard,
+    portfolio,
     profile: { ...profile, ...dashboard.profile },
     profiles: list,
     activeProfileId: profile.id,
@@ -217,6 +226,13 @@ export const api = {
     setPreferredProfileId(result.activeProfileId);
     return result;
   },
+  clearSession: (profileId: string) =>
+    request<{ ok: boolean; profileId: string; clearedRuns: number; clearedTrades: number; clearedEvents: number }>(
+      `/profiles/${profileId}/clear`,
+      { method: "POST" },
+    ),
+  removeSession: (profileId: string) =>
+    request<{ ok: boolean; profileId: string }>(`/profiles/${profileId}`, { method: "DELETE" }),
   disconnectAccount: async () => {
     const response = await fetch("/api/account/disconnect", {
       method: "POST",

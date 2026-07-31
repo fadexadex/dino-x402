@@ -9,6 +9,8 @@ type Props = {
   onActivate: (profileId: string) => void | Promise<void>;
   onDisconnect: () => void | Promise<void>;
   onNewSession: () => void;
+  onClearSession?: (profileId: string) => void | Promise<void>;
+  onRemoveSession?: (profileId: string) => void | Promise<void>;
 };
 
 function labelFor(profile: PortfolioProfile): string {
@@ -32,6 +34,8 @@ export function SessionSwitcher({
   onActivate,
   onDisconnect,
   onNewSession,
+  onClearSession,
+  onRemoveSession,
 }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -75,48 +79,96 @@ export function SessionSwitcher({
       {open && (
         <div
           role="menu"
-          className="absolute top-[calc(100%+6px)] left-0 z-40 w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-line bg-card p-1.5 shadow-sm"
+          className="absolute top-[calc(100%+6px)] left-0 z-40 flex max-h-[min(28rem,70vh)] w-[min(22rem,calc(100vw-2rem))] flex-col rounded-lg border border-line bg-card p-1.5 shadow-sm"
         >
-          <p className="px-2 py-1 text-[10.5px] font-medium tracking-[0.08em] text-ink-3 uppercase">
+          <p className="shrink-0 px-2 py-1 text-[10.5px] font-medium tracking-[0.08em] text-ink-3 uppercase">
             Sessions
           </p>
           {sessions.length === 0 && (
             <p className="px-2 py-2 text-[12px] text-ink-2">No saved sessions yet.</p>
           )}
-          <div className="grid gap-0.5">
-            {sessions.map((profile) => {
-              const isActive = profile.id === active?.id;
-              return (
-                <button
-                  key={profile.id}
-                  type="button"
-                  role="menuitem"
-                  disabled={busy || isActive}
-                  onClick={() => {
-                    setOpen(false);
-                    void onActivate(profile.id);
-                  }}
-                  className={`flex w-full items-start justify-between gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-hover disabled:opacity-100 ${
-                    isActive ? "bg-hover" : ""
-                  }`}
-                >
-                  <span>
-                    <span className="block font-mono text-[11.5px] text-ink">{labelFor(profile)}</span>
-                    <span className="mt-0.5 block text-[11px] text-ink-3">
-                      {kindLabel(profile)} · {profile.status ?? "paused"}
-                      {profile.autonomyMode ? ` · mode ${profile.autonomyMode}` : ""}
-                    </span>
-                  </span>
-                  {isActive && (
-                    <span className="mt-0.5 text-[10.5px] font-medium tracking-[0.06em] text-green uppercase">
-                      active
-                    </span>
-                  )}
-                </button>
-              );
-            })}
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-0.5 [scrollbar-width:thin]">
+            <div className="grid gap-0.5">
+              {sessions.map((profile) => {
+                const isActive = profile.id === active?.id;
+                return (
+                  <div
+                    key={profile.id}
+                    className={`flex items-stretch gap-1 rounded-md ${isActive ? "bg-hover" : ""}`}
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={busy || isActive}
+                      onClick={() => {
+                        setOpen(false);
+                        void onActivate(profile.id);
+                      }}
+                      className="min-w-0 flex-1 px-2 py-2 text-left transition-colors hover:bg-hover disabled:opacity-100"
+                    >
+                      <span className="block font-mono text-[11.5px] text-ink">{labelFor(profile)}</span>
+                      <span className="mt-0.5 block text-[11px] text-ink-3">
+                        {kindLabel(profile)} · {profile.status ?? "paused"}
+                        {profile.autonomyMode ? ` · mode ${profile.autonomyMode}` : ""}
+                      </span>
+                    </button>
+                    <div className="flex shrink-0 flex-col justify-center gap-0.5 py-1 pr-1">
+                      {isActive && (
+                        <span className="px-1 text-[10px] font-medium tracking-[0.06em] text-green uppercase">
+                          active
+                        </span>
+                      )}
+                      {isActive && onClearSession && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setOpen(false);
+                            void onClearSession(profile.id);
+                          }}
+                          className="rounded px-1.5 py-0.5 text-[10.5px] text-ink-3 hover:bg-card hover:text-ink"
+                          title="Clear runs and messages for this session"
+                        >
+                          Clear
+                        </button>
+                      )}
+                      {!isActive && onRemoveSession && profile.kind === "user_wallet" && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setOpen(false);
+                            void onRemoveSession(profile.id);
+                          }}
+                          className="rounded px-1.5 py-0.5 text-[10.5px] text-ink-3 hover:bg-card hover:text-orange"
+                          title="Remove this paused session"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-          <div className="mt-1 grid gap-0.5 border-t border-line pt-1">
+          <div className="mt-1 grid shrink-0 gap-0.5 border-t border-line pt-1">
+            {active && onClearSession && (
+              <button
+                type="button"
+                role="menuitem"
+                disabled={busy}
+                onClick={() => {
+                  setOpen(false);
+                  void onClearSession(active.id);
+                }}
+                className="rounded-md px-2 py-2 text-left text-[12.5px] text-ink transition-colors hover:bg-hover"
+              >
+                Clear active session…
+              </button>
+            )}
             <button
               type="button"
               role="menuitem"

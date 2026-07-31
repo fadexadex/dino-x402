@@ -2,6 +2,8 @@ import type { AllocationBand, AllocationCandidate, Portfolio, PortfolioAllocatio
 
 /** Minimum absolute target drift (percentage points) before a target-seeking swap is proposed. */
 export const DEFAULT_TARGET_DRIFT_PCT = 5;
+/** Floor USD size hint when building a user-requested sample swap. */
+const MIN_SAMPLE_USD = 2;
 
 export function valuePortfolio(portfolio: Portfolio, pricesUsd: Readonly<Record<string, number>>): Portfolio {
   const allocations = portfolio.allocations.map((allocation) => {
@@ -41,13 +43,18 @@ export type LiveValuedAsset = {
 
 /**
  * Keep Mirror Node balances authoritative, but revalue USD / mix % from the
- * newest paid price snapshot (prefer post-swap valuation when present).
+ * newest paid price snapshot and/or an explicit USD price map (display quotes).
  */
 export function mergeLivePortfolioValuation(
   live: Portfolio,
   valuation?: Portfolio,
+  pricesUsd: Readonly<Record<string, number>> = {},
+  priceProvenance?: string,
 ): { totalUsd: number; provenance: string; valued: boolean; assets: LiveValuedAsset[] } {
-  const prices = valuation ? pricesUsdFromPortfolio(valuation) : {};
+  const fromValuation = valuation ? pricesUsdFromPortfolio(valuation) : {};
+  const prices = { ...fromValuation, ...pricesUsd };
+  const markProvenance = priceProvenance
+    ?? (valuation ? valuation.provenance : live.provenance);
   const assets = live.allocations.map((asset) => {
     const price = prices[asset.symbol.toUpperCase()];
     const usdValue = price !== undefined ? asset.balanceFormatted * price : 0;
@@ -56,7 +63,7 @@ export function mergeLivePortfolioValuation(
       balance: asset.balanceFormatted,
       usdValue,
       allocationPct: 0,
-      provenance: price !== undefined && valuation ? valuation.provenance : live.provenance,
+      provenance: price !== undefined ? markProvenance : live.provenance,
     };
   });
   const totalUsd = assets.reduce((sum, asset) => sum + asset.usdValue, 0);
@@ -65,7 +72,7 @@ export function mergeLivePortfolioValuation(
   }
   return {
     totalUsd,
-    provenance: totalUsd > 0 && valuation ? valuation.provenance : live.provenance,
+    provenance: totalUsd > 0 ? markProvenance : live.provenance,
     valued: totalUsd > 0,
     assets,
   };
@@ -221,4 +228,85 @@ export function proposeBandRebalance(
   }
 
   return holdSnapshot(rows);
+}
+
+/**
+ * When the user explicitly asks to trade (Mode 3 approve / Mode 4 execute),
+ * surface a concrete swap. If they named a pair (or the model picked one),
+ * honor that before soft band nudges so "swap HBAR into USDC" is not rewritten.
+ */
+export function proposeRequestedTrade(
+  allocations: readonly PortfolioAllocation[],
+  bands: readonly AllocationBand[],
+  preferred?: { fromSymbol: string; toSymbol: string; reason: string; force?: boolean },
+): AllocationCandidate {
+  validateAllocationBands(bands);
+  const indexed = new Map(allocations.map((item) => [item.symbol.toUpperCase(), item]));
+  const total = allocations.reduce((sum, item) => sum + item.usdValue, 0);
+  if (!Number.isFinite(total) || total <= 0) {
+    return { action: "hold", percentage: 0, amountUsd: 0, reason: "Portfolio has no live USD value." };
+  }
+
+  const rows: BandRow[] = bands.map((band) => {
+    const allocation = indexed.get(band.symbol);
+    const pct = allocation?.allocationPct ?? 0;
+    return {
+      band,
+      ...(allocation ? { allocation } : {}),
+      pct,
+      excessOverMax: pct - band.maxPct,
+      deficitUnderMin: band.minPct - pct,
+      driftFromTarget: pct - band.targetPct,
+    };
+  });
+
+  const pairFromPreferred = (): AllocationCandidate | null => {
+    if (!preferred?.fromSymbol || !preferred?.toSymbol) return null;
+    const from = rows.find((row) => row.band.symbol === preferred.fromSymbol.toUpperCase());
+    const to = rows.find((row) => row.band.symbol === preferred.toSymbol.toUpperCase());
+    if (!from?.allocation || !to || from.band.symbol === to.band.symbol) return null;
+    if (!(from.allocation.usdValue > 0 && from.allocation.balanceFormatted > 0)) return null;
+    const movedPct = Math.min(2, Math.max(1, total > 0 ? (Math.max(2, MIN_SAMPLE_USD) / total) * 100 : 1));
+    return swapCandidate(from, to, movedPct, total, preferred.reason);
+  };
+
+  // User-named / model-picked pair wins over soft drift (hard ceiling breaches still win unless forced).
+  if (preferred?.force) {
+    const forced = pairFromPreferred();
+    if (forced?.action === "swap") return forced;
+  }
+
+  const required = proposeBandRebalance(allocations, bands);
+  if (required.action === "swap" && !preferred?.force) return required;
+
+  const preferredCandidate = pairFromPreferred();
+  if (preferredCandidate?.action === "swap") return preferredCandidate;
+
+  const soft = proposeBandRebalance(allocations, bands, { targetDriftPct: 0.5 });
+  if (soft.action === "swap") {
+    return {
+      ...soft,
+      reason: `You asked for a trade. ${soft.reason} Approve to nudge the book toward targets.`,
+    };
+  }
+
+  const from = rows
+    .filter((row) => row.allocation && row.allocation.usdValue > 0)
+    .sort((a, b) => b.pct - a.pct || b.driftFromTarget - a.driftFromTarget)[0];
+  const to = rows
+    .filter((row) => row.band.symbol !== from?.band.symbol)
+    .sort((a, b) => a.pct - b.pct || a.driftFromTarget - b.driftFromTarget)[0];
+
+  if (!from?.allocation || !to) {
+    return holdSnapshot(rows);
+  }
+
+  const movedPct = Math.min(2, Math.max(0.5, from.pct * 0.05));
+  return swapCandidate(
+    from,
+    to,
+    movedPct,
+    total,
+    `You asked for a trade. The book is already near targets, so this is a small ${from.band.symbol} → ${to.band.symbol} tranche (~${movedPct.toFixed(1)}% of portfolio) for you to review and approve.`,
+  );
 }

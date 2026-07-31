@@ -41,10 +41,27 @@ export function Inspector({
   const annotations = useMemo(
     () =>
       events
-        .filter((e) => e.purchase || e.proposal || e.settlement)
+        .filter((e) => e.purchase || e.proposal || e.settlement || e.step === "verify" || e.id === focusId)
         .map((e) => ({ t: e.at, eventId: e.id, label: `${e.step} · ${e.title}` })),
-    [events],
+    [events, focusId],
   );
+
+  // Guarantee the focused moment has a tick so the tracer can land even when
+  // history is sparse or the event only carries a point price.
+  const graphTicks = useMemo(() => {
+    if (!focused) return ticks;
+    const hasNearby = ticks.some((tick) => Math.abs(tick.t - focused.at) < 1_000);
+    if (hasNearby) return ticks;
+    const eventPrice = (focused as AgentEvent & { price?: number }).price;
+    const price =
+      (typeof eventPrice === "number" && eventPrice > 0 ? eventPrice : undefined)
+      ?? ticks[ticks.length - 1]?.price
+      ?? ticks[0]?.price;
+    if (!(typeof price === "number" && price > 0)) return ticks;
+    return [...ticks, { t: focused.at, price, provenance: focused.provenance ?? ("live" as const) }].sort(
+      (a, b) => a.t - b.t,
+    );
+  }, [ticks, focused]);
 
   const graphEvents = useMemo(() => {
     const fromEvents = events.filter((e) => e.purchase || e.proposal || e.settlement || e.step === "verify" || e.step === "acquire" || e.step === "propose");
@@ -89,7 +106,7 @@ export function Inspector({
           <div className="flex min-h-0 flex-1 flex-col gap-3">
             <div className="min-h-[440px] flex-[5]">
               <LiveGraph
-                ticks={ticks}
+                ticks={graphTicks}
                 markers={markers}
                 annotations={annotations}
                 focusT={focused?.at ?? null}

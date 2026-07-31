@@ -88,4 +88,53 @@ describe("AppStore SQLite durability", () => {
     expect(restored.isHalted()).toBe(true);
     restored.close();
   });
+
+  it("clears profile runs without deleting the custody session", () => {
+    const { store } = createStore();
+    store.upsertProfile({
+      id: "agent",
+      name: "Agent account",
+      kind: "agent_managed",
+      accountId: "0.0.9",
+      network: "hedera:testnet",
+      status: "active",
+      createdAt: "2026-07-31T12:00:00.000Z",
+      updatedAt: "2026-07-31T12:00:00.000Z",
+    });
+    store.addRun(run("keep-scope"), "agent");
+    store.appendEvent("agent.thinking", { text: "hi" }, { profileId: "agent", runId: "keep-scope" });
+    const cleared = store.clearProfileSession("agent");
+    expect(cleared.clearedRuns).toBe(1);
+    expect(store.getState().runs).toHaveLength(0);
+    expect(store.getProfile("agent")?.status).toBe("active");
+    store.close();
+  });
+
+  it("removes paused wallet sessions but keeps the agent treasury", () => {
+    const { store } = createStore();
+    store.upsertProfile({
+      id: "agent-managed",
+      name: "Agent",
+      kind: "agent_managed",
+      accountId: "0.0.9",
+      network: "hedera:testnet",
+      status: "paused",
+      createdAt: "2026-07-31T12:00:00.000Z",
+      updatedAt: "2026-07-31T12:00:00.000Z",
+    });
+    store.upsertProfile({
+      id: "user-wallet-0.0.1",
+      name: "Wallet",
+      kind: "user_wallet",
+      accountId: "0.0.1",
+      network: "hedera:testnet",
+      status: "paused",
+      createdAt: "2026-07-31T12:00:00.000Z",
+      updatedAt: "2026-07-31T12:00:00.000Z",
+    });
+    expect(() => store.removeProfile("agent-managed")).toThrow(/cannot be removed/i);
+    expect(store.removeProfile("user-wallet-0.0.1")).toBe(true);
+    expect(store.getProfile("user-wallet-0.0.1")).toBeNull();
+    store.close();
+  });
 });

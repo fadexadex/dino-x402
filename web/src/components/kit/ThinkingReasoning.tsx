@@ -96,10 +96,10 @@ export function ThinkingReasoning({
   const capped = height > MAX_H && shown.length > 0;
   // Keep a readable floor while waiting for the first sentence — never a blank strip.
   const viewH = capped ? MAX_H : Math.max(height, working && shown.length === 0 ? 44 : working ? 28 : 0);
-  const scrollable = done && open;
+  // Scrollable while streaming (capped) and when the finished Thought is expanded.
+  const scrollable = (working && capped) || (done && open);
   const FADE = 18;
   const translate = scrollable ? 0 : capped ? MAX_H - FADE - height : 0;
-  // While streaming, only fade the top so newest thoughts stay fully readable.
   const showTop = scrollable ? fade.top : capped;
   const showBottom = scrollable ? fade.bottom : false;
   const mask = capped
@@ -108,8 +108,12 @@ export function ThinkingReasoning({
 
   useEffect(() => {
     if (!working || !viewportRef.current) return;
-    viewportRef.current.scrollTo({
-      top: viewportRef.current.scrollHeight,
+    const el = viewportRef.current;
+    // Don't yank the viewport if the user scrolled up to read earlier thoughts.
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    if (!nearBottom && el.scrollTop > 0) return;
+    el.scrollTo({
+      top: el.scrollHeight,
       behavior: "smooth",
     });
   }, [visibleCount, working]);

@@ -145,8 +145,35 @@ type TradeLike = {
   id?: string;
 };
 
-export function toProposal(value: { id: string; fromSymbol?: string; toSymbol?: string; amount?: string | number; expectedOutput?: string | number; minimumOutput?: string | number; slippageBps?: number; expiresAt?: string; reason?: string }): Proposal {
-  return { id: value.id, from: value.fromSymbol ?? "—", to: value.toSymbol ?? "—", amount: number(value.amount), expectedRate: 0, slippagePct: (value.slippageBps ?? 0) / 100, resultingPosition: value.minimumOutput ? `Minimum receive ${value.minimumOutput}` : "Pending verification", expiresAt: at(value.expiresAt), reason: value.reason ?? "Trade proposal awaiting review.", withinLimits: true };
+export function toProposal(value: {
+  id: string;
+  fromSymbol?: string;
+  toSymbol?: string;
+  amount?: string | number;
+  expectedOutput?: string | number;
+  expectedRate?: string | number;
+  minimumOutput?: string | number;
+  slippageBps?: number;
+  expiresAt?: string;
+  reason?: string;
+  breach?: string;
+}): Proposal {
+  const amount = number(value.amount);
+  const expectedOutput = number(value.expectedOutput);
+  const expectedRate = number(value.expectedRate) || (amount > 0 && expectedOutput > 0 ? expectedOutput / amount : 0);
+  return {
+    id: value.id,
+    from: value.fromSymbol ?? "—",
+    to: value.toSymbol ?? "—",
+    amount,
+    expectedRate,
+    slippagePct: (value.slippageBps ?? 0) / 100,
+    resultingPosition: value.minimumOutput ? `Minimum receive ${value.minimumOutput}` : "Pending verification",
+    expiresAt: at(value.expiresAt),
+    reason: value.reason ?? "Trade proposal awaiting review.",
+    withinLimits: true,
+    ...(value.breach ? { breach: value.breach } : {}),
+  };
 }
 
 export function toTicks(events: AgentEvent[]): Tick[] {

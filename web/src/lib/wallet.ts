@@ -39,6 +39,27 @@ function accountIdFromCaip(value: string): string | null {
   return /^0\.0\.\d+$/.test(candidate) ? candidate : null;
 }
 
+/**
+ * WalletConnect Core is a process-wide singleton. Calling SignClient.init() a
+ * second time logs "Core is already initialized" and breaks proposal keys
+ * ("No matching key. proposal: …"). Never destroy/recreate the connector —
+ * only disconnect sessions on the existing client, then openModal again.
+ */
+async function disconnectSessions(connector: DAppConnector): Promise<void> {
+  const client = connector.walletConnectClient;
+  if (!client) {
+    connector.signers = [];
+    return;
+  }
+  const sessions = client.session.getAll();
+  const pairings = client.core.pairing.getPairings();
+  await Promise.allSettled([
+    ...sessions.map((session) => connector.disconnect(session.topic)),
+    ...pairings.map((pairing) => connector.disconnect(pairing.topic)),
+  ]);
+  connector.signers = [];
+}
+
 export async function getConnector(): Promise<DAppConnector> {
   if (!walletConfig.enabled) {
     throw new Error("WalletConnect is not configured. Set PUBLIC_REOWN_PROJECT_ID.");
@@ -58,6 +79,17 @@ export async function getConnector(): Promise<DAppConnector> {
     })();
   }
   return connectorPromise;
+}
+
+/** Drop active sessions/pairings without re-initializing WalletConnect Core. */
+export async function resetConnector(): Promise<void> {
+  if (!connectorPromise) return;
+  try {
+    const connector = await connectorPromise;
+    await disconnectSessions(connector);
+  } catch {
+    // Session already dead — treat as cleared.
+  }
 }
 
 export function getConnectedAccountId(connector: DAppConnector): string | null {
@@ -80,7 +112,7 @@ export function getConnectedAccountId(connector: DAppConnector): string | null {
 export async function connectWallet(options?: { force?: boolean }): Promise<string> {
   const connector = await getConnector();
   if (options?.force) {
-    await disconnectWallet();
+    await disconnectSessions(connector);
   } else {
     const existing = getConnectedAccountId(connector);
     if (existing) return existing;
@@ -95,13 +127,5 @@ export async function connectWallet(options?: { force?: boolean }): Promise<stri
 }
 
 export async function disconnectWallet(): Promise<void> {
-  if (!connectorPromise) return;
-  try {
-    const connector = await connectorPromise;
-    if (connector.walletConnectClient) {
-      await connector.disconnectAll();
-    }
-  } catch {
-    // Wallet already gone — treat as disconnected.
-  }
+  await resetConnector();
 }

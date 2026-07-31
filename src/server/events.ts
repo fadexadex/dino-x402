@@ -35,11 +35,14 @@ export function isUserFacingEvent(event: DurableEvent): boolean {
   if (INTERNAL_TYPE.test(event.type)) return false;
   const ui = eventForUi(event);
   if (INTERNAL_TYPE.test(ui.kind)) return false;
+  const payload = event.payload as Record<string, unknown> | undefined;
+  const nested = payload?.event && typeof payload.event === "object" ? payload.event as Record<string, unknown> : undefined;
+  const nestedMeta = nested?.metadata && typeof nested.metadata === "object" ? nested.metadata as Record<string, unknown> : undefined;
+  // Agents can keep an audit event while staying quiet in the chat stream.
+  if (payload?.presentInUi === false || nestedMeta?.presentInUi === false) return false;
   // Store proposal status transitions are persisted for audit, but they flood the
   // activity rail (especially repeated trade.rejected). Only show curated cards.
   if (/^trade\.(approved|rejected|expired)$/.test(ui.kind)) {
-    const payload = event.payload as Record<string, unknown> | undefined;
-    const nested = payload?.event && typeof payload.event === "object" ? payload.event as Record<string, unknown> : undefined;
     return Boolean(payload?.presentInUi || nested?.title);
   }
   return USER_FACING_KIND.test(ui.kind);
