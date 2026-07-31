@@ -1,6 +1,8 @@
 # Dino Agent
 
-An AI portfolio agent that **pays for live market data one call at a time**, settles those payments on **Hedera testnet**, explains what it sees in plain language, and can rebalance HBAR / USDC / SAUCE when the mix drifts off target.
+An AI portfolio agent that **pays for live market data one call at a time**, settles those payments on **Hedera testnet**, and helps you keep a small HBAR / USDC / SAUCE mix on track.
+
+“Managing the portfolio” here means: **watch holdings → buy fresh prices when needed → explain what changed → decide whether to hold or rebalance** (and only then trade, if your mode allows it). Rebalancing is one possible outcome, not the only job.
 
 Built from the Hedera x402 “agent pays per query” starting point.
 
@@ -11,16 +13,28 @@ Built from the Hedera x402 “agent pays per query” starting point.
 When you open the workbench you can:
 
 1. Choose how money should move (your wallet approves each trade, or a funded agent treasury runs on its own).
-2. Send a short request like “check my mix and rebalance if needed.”
-3. Watch the agent:
+2. Pick how hands-on the agent should be (see modes below).
+3. Send a short request like “check my mix” or “buy fresh prices and tell me what you’d do.”
+4. Watch the agent:
    - read live balances  
-   - **pay** for HBAR, USDC, and SAUCE prices  
-   - share plain-language thoughts  
-   - propose or submit a swap if needed  
-   - refresh the portfolio afterward  
-4. Open HashScan links for every paid read and every swap.
+   - **pay** for HBAR, USDC, and SAUCE prices (unless observe-only)  
+   - share plain-language thoughts and a clear conclusion  
+   - **hold** when bands look fine, or **propose / submit a rebalance** when they don’t  
+   - refresh the portfolio after a successful swap  
+5. Open HashScan links for every paid read and every swap.
 
 No yearly data subscription. Each paid price has its own on-chain receipt.
+
+### What the agent can do (by mode)
+
+| Mode | Buys market data? | Trades? | What you see |
+|---|---|---|---|
+| **1 · Watch only** | No | No | Live balances recorded; no spend, no trade |
+| **2 · Advise me** | Yes | No | Paid prices + recommendation; nothing executes |
+| **3 · Propose, I approve** | Yes | Only after you approve in your wallet | Full check-in; swap waits on your confirmation |
+| **4 · Autonomous** | Yes | Yes, inside your limits | Full check-in; agent can rebalance from the treasury |
+
+So a healthy cycle often ends with **“no trade needed.”** That still counts: the agent paid for data, judged the mix, and chose to hold.
 
 ---
 
