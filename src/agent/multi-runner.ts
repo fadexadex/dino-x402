@@ -264,7 +264,7 @@ export class MultiAssetAgentRunner {
         minPct: band.minPct,
         targetPct: band.targetPct,
         maxPct: band.maxPct,
-        ...(band.tokenId ? { tokenId: band.tokenId } : {}),
+        ...("tokenId" in band && band.tokenId ? { tokenId: band.tokenId } : {}),
       }));
       think("All three paid CoinGecko reads are in. Comparing each sleeve against its allocation band next.");
       const candidate = proposeBandRebalance(portfolio.allocations, bands);

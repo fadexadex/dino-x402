@@ -1,351 +1,306 @@
-# Dino Agent
+# Dino Agent — multi-asset intelligence on Hedera
 
-An AI portfolio agent that **pays for live market data one call at a time**, settles those payments on **Hedera testnet**, and helps you keep a small HBAR / USDC / SAUCE mix on track.
+Dino Agent is a working autonomous portfolio manager built on x402 v2, Hedera testnet, and
+SaucerSwap V2. Each cycle reads the configured Hedera account, purchases live intelligence
+for HBAR, USDC, and SAUCE through three independently settled x402 requests, values the
+managed portfolio, evaluates allocation bands, obtains an executable on-chain quote, and
+either opens an approval gate or submits the bounded trade when autonomous execution is
+explicitly enabled.
 
 “Managing the portfolio” here means: **watch holdings → buy fresh prices when needed → explain what changed → decide whether to hold or rebalance** (and only then trade, if your mode allows it).
 
-Built from the Hedera x402 “agent pays per query” starting point.
+The provided Dino Agent UI is retained as the visual foundation; its demo arrays, random
+activity, and browser-only state have been replaced with the versioned API and durable SSE
+event stream. Fallback market values remain visibly labelled and are prohibited from
+authorizing a trade.
 
----
+A healthy cycle may end with **no trade** — the agent still paid for data, judged the mix,
+and chose to hold. Rebalancing is one possible outcome, not the only job.
 
-## What you get
+## Implemented workflow
 
-When you open the workbench you can:
+1. Mirror Node reads the real account balance and HTS token relationships.
+2. The agent purchases HBAR, USDC, and SAUCE data through the existing x402 payer
+   (skipped in observe-only mode).
+3. Settlement receipts and HashScan links are persisted in SQLite before being streamed.
+4. Allocation bands deterministically select at most one rebalance candidate (or hold).
+5. The order is capped by the 5% portfolio policy and 10 HBAR atomic limit.
+6. SaucerSwap QuoterV2 is called through Hedera's read-only contract endpoint.
+7. Live provenance, quote age, route, slippage, impact, balance, daily volume, and kill-switch
+   rules must all pass.
+8. Mode 3 persists a ten-minute approval proposal (your connected wallet signs). Mode 4 signs
+   only with the dedicated agent account and verifies the resulting Hedera transaction before
+   reporting success. After a verified swap, live balances are re-read and the portfolio mix
+   is refreshed in the UI.
 
-1. Choose how money should move (your wallet approves each trade, or a funded agent treasury runs on its own).
-2. Pick how hands-on the agent should be (see modes below).
-3. Send a short request like “check my mix” or “buy fresh prices and tell me what you’d do.”
-4. Watch the agent:
-   - read live balances  
-   - **pay** for HBAR, USDC, and SAUCE prices (unless observe-only)  
-   - share plain-language thoughts and a clear conclusion  
-   - **hold** when bands look fine, or **propose / submit a rebalance** when they don’t  
-   - refresh the portfolio after a successful swap  
-5. Open HashScan links for every paid read and every swap.
+No plain HBAR transfer is used as a substitute for a swap, and no mock quote is accepted by
+the trade policy.
 
-No yearly data subscription. Each paid price has its own on-chain receipt.
+### Autonomy modes
 
-### What the agent can do (by mode)
+| Mode | Buys market data? | Trades? |
+|---|---|---|
+| 1 · Observe only | No | No |
+| 2 · Advise only | Yes | No — recommendation only |
+| 3 · Propose and wait | Yes | Only after you approve in wallet |
+| 4 · Autonomous within limits | Yes | Yes, from the agent treasury |
 
-| Mode | Buys market data? | Trades? | What you see |
-|---|---|---|---|
-| **1 · Watch only** | No | No | Live balances recorded; no spend, no trade |
-| **2 · Advise me** | Yes | No | Paid prices + recommendation; nothing executes |
-| **3 · Propose, I approve** | Yes | Only after you approve in your wallet | Full check-in; swap waits on your confirmation |
-| **4 · Autonomous** | Yes | Yes, inside your limits | Full check-in; agent can rebalance from the treasury |
+Custody is chosen on `/connect` first (your wallet vs agent treasury). Switching between those
+paths is a re-onboard, because each uses a different account.
 
-So a healthy cycle often ends with **“no trade needed.”** That still counts: the agent paid for data, judged the mix, and chose to hold.
+## Paying with an agent
 
----
+An AI agent can buy a resource autonomously while the payer key stays in the server-side
+signing process. Two ways:
 
-## Quick start
+- **Inside this repo** — use `scripts/x402-sign.ts` directly; see
+  [Paying as an agent (delegated signing)](#paying-as-an-agent-delegated-signing)
+  for the manual `402 → sign → 200` flow.
+- **From anywhere** — use the Hiero CLI via the `hedera-skills` skill; see
+  [Paying via the Hiero CLI skill](#paying-via-the-hiero-cli-skill).
 
-Needs **Node.js 20+**.
+The local signer is fail-closed: it checks x402 version, resource origin, network, asset,
+receiver, and maximum atomic amount before creating a payment. No private key or payment
+signature is returned by the agent API.
 
-```bash
-git clone <your-fork-url>
-cd marketrail-x402
-npm ci
-cp .env.example .env
-cp web/.env.example web/.env
-```
+The same root `.env` credentials (`HEDERA_CLIENT_ID` / `HEDERA_CLIENT_KEY`) are used for:
 
-### Fill `.env`
+1. **x402 data purchases** — signed inside the API process (or via `x402-sign.ts` for CLI).
+2. **Mode 4 swaps** — signed by the server with that dedicated agent account.
+3. **Mode 3 swaps** — signed in the browser wallet instead; the server key is not used.
 
-| Variable | What it is |
-|---|---|
-| `HEDERA_CLIENT_ID` / `HEDERA_CLIENT_KEY` | Funded Hedera **testnet** account used to pay for data (and to trade in autonomous mode) |
-| `PAY_TO_ACCOUNT` | A **different** testnet account that receives those data payments |
-| `DATA_PROVIDER=market` | Live CoinGecko behind the paywall (`mock` for offline testing) |
-| `FACILITATOR_URL` | Payment helper — default `https://api.testnet.blocky402.com` |
+> Planned: move the byte-signing step to the Hiero CLI so signing runs fully securely,
+> replacing the local key in `.env`.
 
-For “approve in wallet” mode, also set `PUBLIC_REOWN_PROJECT_ID` in `web/.env` (from [Reown](https://dashboard.reown.com/)).
+### Paying via the Hiero CLI skill
 
-Need a separate receiver account?
+For the Hiero CLI route, install the [`hedera-skills`](https://github.com/hedera-dev/hedera-skills)
+skill from Hedera. It ships x402 support and documents how the agent should pay — so with it
+installed an agent can run the buy flow through the Hiero CLI instead of the local signer.
 
-```bash
-npx tsx scripts/create-receiver.ts
-```
-
-### Run it
-
-```bash
-# Terminal 1 — API
-npm start
-# → http://localhost:4021
-
-# Terminal 2 — UI
-npm run web:dev
-# → http://localhost:4321
-```
-
-Open **http://localhost:4321/connect**, pick a path, then use the workspace.
-
-```bash
-npm test           # offline tests
-npm run preflight  # check outside services
-npm run e2e        # one real paid call + HashScan proof
-```
-
----
-
-## How the product feels
-
-### First visit: choose custody
-
-On `/connect` you answer one question first: **how should money move?**
-
-| Choice | What happens |
-|---|---|
-| **I approve each trade** | Connect your Hedera wallet. Then pick how hands-on you want to be (watch, advise, or propose-and-approve). Nothing leaves your account until you confirm in the wallet app. |
-| **Let the agent run on its own** | Fund the server-managed treasury. The agent can trade inside your limits without asking every time. |
-
-That choice is made up front on purpose. Each path uses a different account, so switching mid-chat would be confusing.
-
-![User flow from connect to conclusion](docs/diagrams/onboarding.png)
-
-### Inside the workspace
-
-- **Left:** live holdings and recent runs  
-- **Center:** the activity stream — payments, thoughts, trades, conclusion  
-- **Right (Graph):** prices the agent paid to unlock, with markers on those moments  
-- **Bottom:** send a check-in in everyday language  
-
-After a successful swap, balances and mix percentages refresh from live holdings.
-
----
+> **Disclaimer:** the skill supplies the x402 capability and instructions, but the actual flow
+> is driven by the agent. How reliably it works depends on the knowledge the agent is given —
+> via its system prompt, the skill itself, or other context. Treat the skill as the tool, not
+> the guarantee: a well-briefed agent pays smoothly, an under-briefed one may not.
 
 ## Architecture
 
-### Big picture
-
-The browser talks to our API. The portfolio agent buys prices from our own **market-data shop** (paywalled with x402). After payment settles on Hedera, the shop fetches live prices from CoinGecko and returns them. If a rebalance is needed, the agent uses SaucerSwap on Hedera, then refreshes balances.
+### System overview
 
 ![System architecture](docs/diagrams/architecture.png)
 
+### One check-in
+
+![Check-in workflow](docs/diagrams/workflow.png)
+
+### Onboarding and modes
+
+![Onboarding flow](docs/diagrams/onboarding.png)
+
 <details>
-<summary>Editable Mermaid source</summary>
+<summary>Mermaid sources (editable)</summary>
 
-```mermaid
-flowchart TB
-  subgraph People["People using the app"]
-    UI["Dino Agent workbench<br/>browser UI"]
-  end
-
-  subgraph App["This application"]
-    API["API server<br/>port 4021"]
-    AGENT["Portfolio agent<br/>check-in runner"]
-    STORE["Local SQLite store<br/>runs · payments · events"]
-    DATA["Market-data shop<br/>/data/quote · /data/spot-price"]
-  end
-
-  subgraph Outside["Outside services"]
-    CG["CoinGecko<br/>live prices"]
-    FAC["Blocky402<br/>payment helper"]
-    HED["Hedera testnet<br/>payments + swaps"]
-    DEX["SaucerSwap<br/>token exchange"]
-    MIR["Mirror Node<br/>balance lookup"]
-  end
-
-  UI <-->|"live updates"| API
-  API --> AGENT
-  AGENT --> STORE
-  AGENT -->|"1. read balances"| MIR
-  AGENT -->|"2. buy prices via x402"| DATA
-  DATA -->|"3. fetch after payment"| CG
-  DATA -->|"payment settle"| FAC
-  FAC --> HED
-  AGENT -->|"4. maybe rebalance"| DEX
-  DEX --> HED
-  AGENT -->|"5. confirm result"| MIR
-```
+Diagram sources live next to the PNGs in [`docs/diagrams/`](docs/diagrams/).
 
 </details>
 
-### One check-in, step by step
+### Code map
 
-This is the heart of the loop: ask for a price → get “payment required” → pay on Hedera → unlock data → decide → maybe swap → refresh.
+- `src/core/provider.ts` — the `DataProvider` contract (the deliverable).
+- `src/providers/mock/` — deterministic `MockDataProvider`.
+- `src/providers/market/` — live CoinGecko-backed provider with a labeled resilient fallback.
+- `src/agent/` — single-asset x402 buyer plus multi-asset portfolio orchestration.
+- `src/portfolio/` — live Mirror Node holdings and deterministic allocation-band logic.
+- `src/trading/` — SaucerSwap route/quote/calldata, policy, execution, and verification.
+- `src/store/` — SQLite WAL projection, append-only event log, recovery, and leases.
+- `src/scheduler/` — persisted cadence, daily budget enforcement, and single-run lease.
+- `src/server/` — Hono app: pre-validation → `paymentMiddleware` → handler.
+- `scripts/e2e-pay.ts` — live `402 → sign → settle → 200` verification with HashScan and mirror-node proof.
+- `web/` — the production-wired Dino Agent UI and Playwright browser suite.
 
-![Check-in sequence](docs/diagrams/workflow.png)
-
-<details>
-<summary>Editable Mermaid source</summary>
-
-```mermaid
-sequenceDiagram
-  participant U as You
-  participant A as Portfolio agent
-  participant S as Market-data shop
-  participant F as Blocky402
-  participant H as Hedera testnet
-  participant C as CoinGecko
-  participant D as SaucerSwap
-
-  U->>A: Start a check-in
-  A->>A: Read live wallet balances
-  A->>S: Ask for HBAR price
-  S-->>A: Payment required (HTTP 402)
-  A->>F: Pay tiny HBAR amount
-  F->>H: Settle payment on-chain
-  H-->>A: Payment confirmed
-  A->>S: Retry with proof of payment
-  S->>C: Fetch live price
-  C-->>S: Price + 24h change
-  S-->>A: Unlock market data
-  Note over A: Repeat for USDC and SAUCE
-  A->>A: Compare mix to target bands
-  alt Mix needs a rebalance
-    A->>D: Get live exchange quote
-    A->>D: Submit swap (auto or after your approval)
-    D->>H: Swap settles on Hedera
-    A->>A: Refresh portfolio balances
-  else Mix looks healthy
-    A-->>U: No trade needed
-  end
-  A-->>U: Conclusion + HashScan receipts
-```
-
-</details>
-
----
-
-## What happens in a successful cycle
-
-1. **Read holdings** from Hedera Mirror Node.  
-2. **Buy prices** for HBAR, USDC, and SAUCE — each call is its own small payment.  
-3. **Think out loud** in the UI using the paid feed.  
-4. **Compare** the mix to target bands (for example: HBAR should stay under a ceiling).  
-5. **Trade** only if safety checks pass — wallet approval (Mode 3) or agent treasury (Mode 4).  
-6. **Refresh** portfolio dollars and percentages from live balances after a successful swap.  
-7. **Keep** every step so the stream and receipt links survive a page refresh.
-
-Guards built in:
-
-- Trade size caps (about 5% of a sleeve / 10 HBAR max per atomic move)  
-- Non-live / fallback prices are labeled and **cannot** authorize a trade  
-- Global halt switch  
-- No plain HBAR transfer pretending to be a swap  
-
----
-
-## Folder structure
+Swap data source: one line in `src/providers/index.ts`.
+Swap facilitator: change `FACILITATOR_URL`.
 
 ```text
 marketrail-x402/
 ├── README.md
-├── package.json              ← API + scripts (npm workspaces)
-├── .env.example              ← API / agent settings template
-├── docs/
-│   ├── diagrams/             ← architecture images + Mermaid sources
-│   └── SUBMISSION_CHECKLIST.md
+├── package.json
+├── .env.example
+├── docs/diagrams/          ← architecture PNGs + Mermaid sources
+├── docs/SUBMISSION_CHECKLIST.md
 ├── scripts/
-│   ├── e2e-pay.ts            ← one live paid call + proof
-│   ├── preflight.ts          ← check outside services
-│   ├── x402-sign.ts          ← signs a payment challenge locally
-│   └── create-receiver.ts    ← create a PAY_TO account
-├── src/                      ← API + agent
-│   ├── agent/                ← check-in runner and thoughts
-│   ├── core/                 ← config, catalog, payment wiring
-│   ├── portfolio/            ← live balances + target bands
-│   ├── providers/
-│   │   ├── market/           ← CoinGecko data (after payment)
-│   │   └── mock/             ← offline fake data
-│   ├── trading/              ← quotes, safety checks, SaucerSwap
-│   ├── store/                ← SQLite runs, events, proposals
-│   ├── scheduler/            ← timed check-ins
-│   └── server/               ← HTTP API + live event stream
+│   ├── e2e-pay.ts
+│   ├── preflight.ts
+│   ├── x402-sign.ts
+│   └── create-receiver.ts
+├── src/
+│   ├── agent/
+│   ├── core/
+│   ├── portfolio/
+│   ├── providers/{market,mock}/
+│   ├── trading/
+│   ├── store/
+│   ├── scheduler/
+│   └── server/
 ├── test/
-└── web/                      ← Astro + React workbench
-    ├── .env.example
-    ├── src/components/
-    ├── src/lib/              ← API client, wallet connect / sign
-    └── e2e/
+└── web/
 ```
 
-Change the data backend in `src/providers/index.ts`.  
-Change the payment helper with `FACILITATOR_URL`.
+## Setup
 
----
+This is an npm workspace (root = API server, `web/` = Astro workbench). Run everything from the
+repo root. Requires Node.js ≥20 (npm bundled).
 
-## Market-data catalog
+1. `npm ci` — installs the locked root and web dependencies.
+2. Copy `.env.example` to `.env`.
+3. Set `HEDERA_CLIENT_ID` / `HEDERA_CLIENT_KEY` to a funded ECDSA testnet payer.
+4. Set `PAY_TO_ACCOUNT` to a **different** Hedera testnet account. To create a distinct
+   receiver controlled by the same ECDSA key, run `npx tsx scripts/create-receiver.ts` and
+   copy the printed account ID. The script never prints a private key.
+5. Keep `SIGNER_MAX_AMOUNT_ATOMIC=5000000` to allow the most expensive catalog product
+   (0.05 HBAR) while rejecting larger challenges. Keep `SIGNER_ALLOWED_ORIGIN` /
+   `SERVER_URL` aligned with how you call the API (`http://localhost:4021` by default).
+6. Optional: add `MISTRAL_API_KEY` only if using the model-backed planner; it stays server-side.
+7. For wallet-approval mode, copy `web/.env.example` → `web/.env` and set
+   `PUBLIC_REOWN_PROJECT_ID`.
 
-Unpaid calls return **HTTP 402 Payment Required**.
+The dedicated agent account is the custody boundary for both x402 purchases and optional
+autonomous swaps. Keep it funded only with test assets appropriate for the configured caps.
+On `/connect`, pick wallet approval or autonomous treasury explicitly.
 
-| Product | What you get | Price |
+### SaucerSwap access
+
+No public or private SaucerSwap API key is needed for the implemented trade path. Quotes are
+read directly from testnet QuoterV2 and swaps are submitted directly to the Router contract.
+The public REST service is therefore not a production dependency. If a later feature needs
+SaucerSwap's hosted analytics or token metadata at sustained volume, request a supported key
+from their team and keep it server-side; do not embed a shared public key in the browser.
+
+Credentials pasted into chats, issues, logs, or screenshots must be rotated before use.
+
+### API server
+
+```bash
+npm run dev      # hot reload on http://localhost:4021
+npm start        # run once, no watch
+npm test         # offline contract/unit tests
+npm run e2e      # real paid request through Blocky402 + mirror verification
+npm run preflight
+```
+
+- `POST /api/agent/run` — run the agent flow and return a redacted protocol trace.
+- `GET /api/health` — provider and agent readiness without exposing credentials.
+- `GET /api/v1/profiles` — custody profiles and current autonomy/schedule state.
+- `POST /api/v1/profiles/:id/runs` — concurrency-safe multi-asset cycle.
+- `GET /api/v1/profiles/:id/stream` — durable SSE replay and live lifecycle events.
+- `GET /api/v1/profiles/:id/proposals` — fresh approval-gated SaucerSwap orders.
+- `POST /api/v1/proposals/:id/approve|reject` — evaluate a pending order exactly once.
+- `POST /api/v1/proposals/:id/confirm` — confirm a wallet-signed swap.
+- `PATCH /api/v1/profiles/:id/schedule` — cadence, pause, and autonomy settings.
+- `POST /api/v1/system/halt|resume` — global kill switch.
+
+### Web (live agent workbench)
+
+```bash
+npm run web:dev                         # http://localhost:4321
+npm run web:build && npm run web:preview
+npm run web:typecheck
+npm run test -w web
+npm run test:e2e -w web
+```
+
+For a non-default API port, start Astro with `API_PROXY_TARGET=http://127.0.0.1:PORT`.
+If you call the signer CLI against `127.0.0.1`, also set `SIGNER_ALLOWED_ORIGIN` to that same
+origin — the fail-closed policy rejects mismatched hosts.
+
+## Persistence and safety
+
+Runtime state is stored in `data/agent.sqlite` with WAL journaling. Runs, proposals, spend,
+profiles, mandates, system halt state, and SSE events survive restart. A run interrupted by a
+process restart is marked failed rather than resubmitted. Scheduler leases prevent overlapping
+manual and scheduled runs on the single-host deployment. Secrets and SQLite runtime files are
+ignored by git.
+
+## Catalog
+
+| product | params | price |
 |---|---|---|
-| `spot-price` | Live USD price | 0.01 HBAR |
-| `quote` | Price + 24h change + volume (used for decisions) | 0.02 HBAR |
-| `ohlc` | Candle for a date | 0.05 HBAR |
+| `spot-price` | `symbol` | 0.01 HBAR |
+| `quote` | `symbol` | 0.02 HBAR |
+| `ohlc` | `symbol`, `date` | 0.05 HBAR |
 
-Live list: `GET http://localhost:4021/catalog`
+`GET /catalog` returns the live catalog. The payment outcome is read from the `payment-response`
+header (base64 JSON), and the Hedera transaction id is carried in its `transaction` field.
 
-### About CoinGecko
+CoinGecko supplies the upstream numbers. This server is the Hedera x402 paywall: unpaid calls
+return HTTP 402; after settlement the shop fetches CoinGecko and unlocks the payload.
 
-CoinGecko supplies the **numbers**. This app supplies the **paywall**:
+## Paying as an agent (delegated signing)
 
-- No payment → 402  
-- Settled Hedera micropayment → live price unlocked  
+`scripts/x402-sign.ts` is a standalone signer so an agent can drive the payment over plain
+HTTP while the private key stays in a separate local process. The agent runs the HTTP flow;
+the script validates the challenge against the configured policy and only then signs.
 
-You could call CoinGecko’s free HTTP API directly, but then there would be no Hedera payment story. Here the agent pays our market-data shop on Hedera; the shop then fetches CoinGecko after settlement.
+- **stdin** ← value of the `payment-required` header from the 402 response
+- **stdout** → value of the `payment-signature` header to retry with
 
----
+The key is read from `.env` and never written to stdout, argv, or application logs. The
+signed payload is intentionally returned to complete x402. For stronger custody, replace
+the local signer with an HSM/KMS or Hiero CLI signer; the HTTP flow remains the same.
 
-## Useful API routes
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /api/health` | Is the server ready? (no secrets) |
-| `GET /api/v1/onboarding` | Custody / treasury status |
-| `POST /api/v1/onboarding/complete` | Finish setup (modes 1–4) |
-| `GET /api/v1/profiles/:id/dashboard` | Portfolio, runs, events |
-| `POST /api/v1/profiles/:id/runs` | Start a check-in |
-| `GET /api/v1/profiles/:id/stream` | Live event stream |
-| `POST /api/v1/proposals/:id/approve` | Approve a trade |
-| `POST /api/v1/proposals/:id/confirm` | Confirm a wallet-signed swap |
-| `POST /api/v1/system/halt` | Emergency stop |
-
----
-
-## Prove a payment without the UI
+Requires a funded ECDSA testnet account in `.env` (`HEDERA_CLIENT_ID`, `HEDERA_CLIENT_KEY`).
+Use the same host as `SERVER_URL` / `SIGNER_ALLOWED_ORIGIN` (default `http://localhost:4021`).
 
 ```bash
 URL="http://localhost:4021/data/spot-price?symbol=HBAR"
 
+# 1. Trigger the 402 and capture the payment-required header
 PR=$(curl -s -D - -o /dev/null "$URL" \
   | grep -i '^payment-required:' | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r')
 
+# 2. Delegate signing (key stays in the script)
 SIG=$(printf '%s' "$PR" | npx tsx scripts/x402-sign.ts)
 
+# 3. Retry with the signature: 200 + data, settlement in the payment-response header
 curl -s -i "$URL" -H "payment-signature: $SIG"
 ```
 
-Expect HTTP 200 and a `payment-response` header with a Hedera transaction id.
+The signed payload expires after `maxTimeoutSeconds` (180s), so sign immediately before
+the retry. The reference scripts expect an ECDSA account.
 
----
+## Demo and submission
 
-## Example on-chain receipts (Hedera testnet)
+- [Submission checklist](docs/SUBMISSION_CHECKLIST.md) — release, secret, and HashScan proof checks.
+- [MIT license](LICENSE) — this repository is open source.
 
-Replace with fresh links from your own `npm run e2e` or UI run before sharing.
+### Verified Hedera testnet proof
 
-| What | Example |
-|---|---|
-| Paid HBAR price | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785493884-281733761) |
-| Paid USDC price | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785493890-941770239) |
-| Paid SAUCE price | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785493898-759696230) |
-| SaucerSwap rebalance | [HashScan](https://hashscan.io/testnet/transaction/0.0.6255888-1785493939-647708643) |
+| flow | product | amount | transaction |
+|---|---|---:|---|
+| Multi-asset cycle | HBAR intelligence | 0.01 HBAR | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785493884-281733761) |
+| Multi-asset cycle | USDC intelligence | 0.01 HBAR | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785493890-941770239) |
+| Multi-asset cycle | SAUCE intelligence | 0.01 HBAR | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785493898-759696230) |
+| Approval-gated SaucerSwap V2 trade | 10 HBAR → 13.410262 USDC | bounded by 1% slippage | [HashScan](https://hashscan.io/testnet/transaction/0.0.6255888-1785493939-647708643) |
+| Browser portfolio agent (Mistral plan + analysis) | `quote?symbol=HBAR` | 0.02 HBAR | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785458285-103875125) |
+| CLI protocol acceptance test | `spot-price?symbol=HBAR` | 0.01 HBAR | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785457946-390016878) |
 
----
+The x402 transfers were checked through Hedera's testnet mirror API for `SUCCESS`, with payer
+`0.0.6255888` debited and receiver `0.0.9848501` credited by the exact catalog price. The swap
+proof additionally verifies that account `0.0.6255888` received at least the Router order's
+minimum USDC output across the transaction's child records. Run `npm run e2e` to generate and
+verify a fresh x402 proof before recording.
 
-## Safety
+## Known limitations
 
-- Use **testnet** funds only.  
-- Never commit `.env` or paste private keys into the UI, chat, or screenshots.  
-- Local SQLite files live under `data/` (gitignored).  
-- This is a single-host demo, not a multi-region production setup.  
-- Public CoinGecko can rate-limit; fallbacks are labeled and blocked from trading.
-
----
-
-## License
-
-[MIT](LICENSE)
+- The public CoinGecko feed is not investment-grade and can rate-limit; fallback values are
+  deterministic and returned with `isLive: false`. A cycle may display them, but policy blocks
+  every associated trade.
+- `freshnessWindowSec` is in the contract but not enforced (clean pay-per-call).
+- The hosted testnet facilitator is an external availability and rate-limit dependency.
+- Local `.env` key custody is suitable for a testnet demo, not production funds.
+- User-wallet Mode 3 needs `PUBLIC_REOWN_PROJECT_ID` and a WalletConnect session; without it,
+  approve-in-wallet cannot prompt. The dedicated agent profile (Mode 4) is the fully working
+  end-to-end path out of the box.
+- This implementation is intentionally single-host. Horizontal deployment needs a shared job
+  queue/lease backend and managed SQL rather than the local SQLite scheduler lease.
+- No HCS attestation is included in this version; settlement proof is the Hedera transaction.
