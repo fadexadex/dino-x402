@@ -116,6 +116,8 @@ export interface SpendingLedger {
 
 export interface StoreState {
   account: ConnectedAccount | null;
+  /** Explicitly selected custody session; falls back to any `status: "active"` profile. */
+  activeProfileId?: string | null;
   schedule: ScheduleConfig;
   runs: AgentMultiRunRecord[];
   pendingTrades: PendingTrade[];

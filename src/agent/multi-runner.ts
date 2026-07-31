@@ -79,7 +79,7 @@ export class MultiAssetAgentRunner {
     const state = store.getState();
     // Prefer the active agent treasury / requested profile — never a stale paused wallet.
     const activeAgent = state.profiles?.find((profile) => profile.kind === "agent_managed" && profile.status === "active");
-    const activeWallet = state.profiles?.find((profile) => profile.id === "connected-wallet" && profile.status === "active");
+    const activeWallet = state.profiles?.find((profile) => profile.kind === "user_wallet" && profile.status === "active");
     const accountId = inputAccount
       ?? (input.profileId ? state.profiles?.find((profile) => profile.id === input.profileId)?.accountId : undefined)
       ?? activeAgent?.accountId
@@ -89,6 +89,7 @@ export class MultiAssetAgentRunner {
     if (!accountId) throw new Error("A real Hedera account must be connected before running the agent");
     const profileId = input.profileId
       ?? state.profiles?.find((profile) => profile.accountId === accountId && profile.status === "active")?.id
+      ?? state.profiles?.find((profile) => profile.kind === "user_wallet" && profile.accountId === accountId)?.id
       ?? state.profiles?.find((profile) => profile.id === "connected-wallet" && profile.accountId === accountId)?.id
       ?? state.profiles?.find((profile) => profile.accountId === accountId)?.id;
     const events: AgentEvent[] = [];
@@ -259,13 +260,16 @@ export class MultiAssetAgentRunner {
       const portfolio = valuePortfolio({ ...rawPortfolio, allocations: managedAllocations }, prices);
       record.portfolioBefore = portfolio; store.updateRun(runId, { portfolioBefore: portfolio, dataPurchases: record.dataPurchases, spentDataHbar: record.spentDataHbar }, profileId);
       const mandate = profileId ? store.getLatestMandate(profileId) : undefined;
-      const bands = (mandate?.allocations?.length ? mandate.allocations : DEFAULT_BANDS).map((band) => ({
-        symbol: band.symbol,
-        minPct: band.minPct,
-        targetPct: band.targetPct,
-        maxPct: band.maxPct,
-        ...(band.tokenId ? { tokenId: band.tokenId } : {}),
-      }));
+      const bands = (mandate?.allocations?.length ? mandate.allocations : DEFAULT_BANDS).map((band) => {
+        const tokenId = "tokenId" in band && typeof band.tokenId === "string" ? band.tokenId : undefined;
+        return {
+          symbol: band.symbol,
+          minPct: band.minPct,
+          targetPct: band.targetPct,
+          maxPct: band.maxPct,
+          ...(tokenId ? { tokenId } : {}),
+        };
+      });
       think("All three paid CoinGecko reads are in. Comparing each sleeve against its allocation band next.");
       const candidate = proposeBandRebalance(portfolio.allocations, bands);
       const narrative = portfolioInsightNarrative({

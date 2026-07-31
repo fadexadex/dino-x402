@@ -13,7 +13,7 @@ const DEFAULT_SCHEDULE: ScheduleConfig = {
 };
 
 const defaults = (): StoreState => ({
-  account: null, schedule: { ...DEFAULT_SCHEDULE }, runs: [], pendingTrades: [],
+  account: null, activeProfileId: null, schedule: { ...DEFAULT_SCHEDULE }, runs: [], pendingTrades: [],
   spending: { todayDataHbar: 0, todayTradeHbar: 0, totalDataHbar: 0, totalTradeHbar: 0, lastResetDate: today() },
   logs: [], profiles: [], mandates: [], events: [], schedulerLeases: [], system: { halted: false },
 });
@@ -121,6 +121,17 @@ export class AppStore {
   }
 
   setAccount(account: ConnectedAccount): void { this.commit("account.connected", account, () => { this.state.account = account; }); }
+  clearAccount(): void {
+    const previous = this.state.account;
+    this.commit("account.disconnected", { accountId: previous?.accountId ?? null }, () => {
+      this.state.account = null;
+    });
+  }
+  setActiveProfileId(profileId: string | null): void {
+    this.commit("session.active_changed", { profileId }, () => {
+      this.state.activeProfileId = profileId;
+    });
+  }
   updateSchedule(update: Partial<ScheduleConfig>): ScheduleConfig {
     const next = { ...this.state.schedule, ...update };
     this.commit("schedule.updated", next, () => { this.state.schedule = next; this.db.prepare("INSERT INTO schedules(id,value,updated_at) VALUES('default',?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(stringify(next), this.now().toISOString()); });

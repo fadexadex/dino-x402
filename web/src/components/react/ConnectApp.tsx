@@ -1,13 +1,21 @@
 import { useEffect, useState } from "react";
 import { DinoMark } from "../agent/DinoMark";
 import { api } from "../../lib/agent-api";
-import { connectWallet, walletConfig } from "../../lib/wallet";
+import { connectWallet, disconnectWallet, walletConfig } from "../../lib/wallet";
 
 const WALLETS = ["HashPack", "Blade", "Kabila"] as const;
 
 type Step = "path" | "connect" | "intensity" | "fund" | "done";
 type CustodyPath = "approval" | "autonomous";
 type WalletIntensity = 1 | 2 | 3;
+type SessionRow = {
+  id: string;
+  name: string;
+  kind: "user_wallet" | "agent_managed";
+  accountId: string;
+  status: string;
+  autonomyMode: 1 | 2 | 3 | 4 | null;
+};
 
 const INTENSITY: Array<{ mode: WalletIntensity; title: string; detail: string }> = [
   {
@@ -28,10 +36,10 @@ const INTENSITY: Array<{ mode: WalletIntensity; title: string; detail: string }>
 ];
 
 /**
- * Custody is chosen once at the door:
+ * Custody is chosen at the door:
  * - Approval path → connect wallet → intensity 1–3
  * - Autonomous path → fund server treasury → Mode 4
- * Switching custody later is a re-onboard, not a mid-chat dial flip.
+ * Users can keep multiple wallet sessions and switch later from the workspace.
  */
 export function ConnectApp() {
   const [step, setStep] = useState<Step>("path");
@@ -42,6 +50,8 @@ export function ConnectApp() {
   const [agentAccountId, setAgentAccountId] = useState<string | null>(null);
   const [agentFunded, setAgentFunded] = useState(false);
   const [agentHbar, setAgentHbar] = useState(0);
+  const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const forceNew = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1";
 
   useEffect(() => {
     void api.getOnboarding().then((state) => {
@@ -50,14 +60,14 @@ export function ConnectApp() {
         setAgentFunded(state.agentTreasury.funded);
         setAgentHbar(state.agentTreasury.hbarFormatted);
       }
-      if (state.connectedAccountId) {
+      if (state.connectedAccountId && !forceNew) {
         setAccountId(state.connectedAccountId);
       }
+      setSessions(state.sessions ?? []);
       // Always land on the custody fork so users can change setup deliberately.
-      // Prior completion is remembered only as account/treasury context.
       setStep("path");
     }).catch(() => undefined);
-  }, []);
+  }, [forceNew]);
 
   const refreshTreasury = async () => {
     const state = await api.getOnboarding();
@@ -66,13 +76,14 @@ export function ConnectApp() {
       setAgentFunded(state.agentTreasury.funded);
       setAgentHbar(state.agentTreasury.hbarFormatted);
     }
+    setSessions(state.sessions ?? []);
     return state.agentTreasury;
   };
 
   const chooseApprovalPath = () => {
     setError(null);
     setPath("approval");
-    setStep(accountId ? "intensity" : "connect");
+    setStep(accountId && !forceNew ? "intensity" : "connect");
   };
 
   const chooseAutonomousPath = async () => {
@@ -95,18 +106,48 @@ export function ConnectApp() {
     }
   };
 
-  const onConnect = async () => {
+  const onConnect = async (force = forceNew || Boolean(accountId)) => {
     if (!walletConfig.enabled || busy) return;
     setBusy(true);
     setError(null);
     try {
-      const connected = await connectWallet();
-      await api.connectAccount(connected, "Connected wallet");
+      const connected = await connectWallet({ force });
+      await api.connectAccount(connected, `Wallet ${connected}`);
       setAccountId(connected);
       await refreshTreasury();
       setStep("intensity");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Wallet connection failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onDisconnect = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.disconnectAccount();
+      await disconnectWallet();
+      setAccountId(null);
+      await refreshTreasury();
+      setStep("path");
+      setPath(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not disconnect.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onResumeSession = async (sessionId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.activateProfile(sessionId);
+      window.location.href = "/";
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not resume that session.");
     } finally {
       setBusy(false);
     }
@@ -156,11 +197,49 @@ export function ConnectApp() {
         {step === "path" && (
           <>
             <h1 className="mt-6 text-[22px] leading-tight font-semibold tracking-[-0.02em] text-ink">
-              How should money move?
+              {forceNew ? "Start a new session" : "How should money move?"}
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-ink-2">
-              Pick custody once. You can change it later from onboarding — not mid-chat — because each path uses a different account.
+              {forceNew
+                ? "Connect a different wallet or enable the autonomous treasury. Existing sessions stay saved so you can switch back later."
+                : "Pick custody for this session. You can disconnect, add another wallet, or switch sessions any time from the workspace."}
             </p>
+
+            {sessions.length > 0 && (
+              <div className="mt-5 rounded-lg border border-line bg-card p-3">
+                <p className="text-[11px] font-medium tracking-[0.08em] text-ink-3 uppercase">Saved sessions</p>
+                <div className="mt-2 grid gap-1">
+                  {sessions.map((session) => (
+                    <button
+                      key={session.id}
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void onResumeSession(session.id)}
+                      className="flex items-center justify-between rounded-md px-2 py-2 text-left transition-colors hover:bg-hover disabled:opacity-50"
+                    >
+                      <span>
+                        <span className="block font-mono text-[12px] text-ink">{session.accountId}</span>
+                        <span className="mt-0.5 block text-[11px] text-ink-3">
+                          {session.kind === "agent_managed" ? "autonomous" : "wallet"} · {session.status}
+                        </span>
+                      </span>
+                      <span className="text-[11px] text-ink-2">Resume</span>
+                    </button>
+                  ))}
+                </div>
+                {accountId && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void onDisconnect()}
+                    className="mt-2 rounded-control px-2 py-1.5 text-[12px] text-ink-3 hover:bg-hover"
+                  >
+                    Disconnect current wallet
+                  </button>
+                )}
+              </div>
+            )}
+
             <div className="mt-6 grid gap-2">
               <button
                 type="button"
@@ -168,7 +247,9 @@ export function ConnectApp() {
                 onClick={chooseApprovalPath}
                 className="rounded-lg border border-line bg-card px-3.5 py-3 text-left transition-colors hover:bg-hover disabled:opacity-50"
               >
-                <span className="text-[13px] font-medium text-ink">I approve each trade</span>
+                <span className="text-[13px] font-medium text-ink">
+                  {forceNew || accountId ? "Connect a wallet for this session" : "I approve each trade"}
+                </span>
                 <span className="mt-1 block text-[12px] leading-relaxed text-ink-2">
                   Connect your Hedera wallet. The agent may prepare swaps; nothing leaves your account until you confirm in the wallet app.
                 </span>
@@ -194,7 +275,7 @@ export function ConnectApp() {
               Connect your wallet
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-ink-2">
-              Approval-gated mode uses the account you connect here. You will approve each trade in this same wallet.
+              Approval-gated mode uses the account you connect here. You can disconnect later and connect a different wallet as another session.
             </p>
             <div className="mt-6 grid gap-2">
               {WALLETS.map((wallet) => (
@@ -202,7 +283,7 @@ export function ConnectApp() {
                   key={wallet}
                   type="button"
                   disabled={!walletConfig.enabled || busy}
-                  onClick={() => void onConnect()}
+                  onClick={() => void onConnect(true)}
                   className="flex items-center justify-between rounded-lg border border-line bg-card px-3.5 py-3 text-left transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <span className="text-[13px] font-medium text-ink">{wallet}</span>
@@ -243,14 +324,24 @@ export function ConnectApp() {
                 </button>
               ))}
             </div>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => setStep(accountId ? "path" : "connect")}
-              className="mt-3 rounded-control px-3 py-1.5 text-[12.5px] text-ink-3"
-            >
-              Back
-            </button>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setStep("connect")}
+                className="rounded-control px-3 py-1.5 text-[12.5px] text-ink-3"
+              >
+                Use a different wallet
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setStep(accountId ? "path" : "connect")}
+                className="rounded-control px-3 py-1.5 text-[12.5px] text-ink-3"
+              >
+                Back
+              </button>
+            </div>
           </>
         )}
 

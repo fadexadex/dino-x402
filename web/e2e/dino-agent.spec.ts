@@ -2,14 +2,28 @@ import { expect, test, type Page } from "@playwright/test";
 
 type Call = { method: string; path: string; headers: Record<string, string>; body: Record<string, unknown> };
 type Event = { id: string; sequence: number; runId: string; kind: string; title: string; detail?: string; occurredAt: string; provenance: "live" | "cached" | "fallback" | "stale"; payload?: Record<string, unknown> };
-type State = { profiles: Array<Record<string, unknown>>; events: Event[]; proposals: Array<Record<string, unknown>>; halted: boolean; schedule: { cadenceMinutes: number; paused: boolean; autonomyMode: 1 | 2 | 3 | 4 }; mandate: Record<string, unknown>; calls: Call[] };
+type Profile = Record<string, unknown>;
+type State = {
+  profiles: Profile[];
+  activeProfileId: string | null;
+  events: Event[];
+  proposals: Array<Record<string, unknown>>;
+  halted: boolean;
+  schedule: { cadenceMinutes: number; paused: boolean; autonomyMode: 1 | 2 | 3 | 4 };
+  mandate: Record<string, unknown>;
+  calls: Call[];
+  accountCalls: Call[];
+};
 
 const NOW = "2026-07-31T10:00:00.000Z";
-const profile = { id: "agent-testnet", name: "Agent treasury", kind: "agent_managed", accountId: "0.0.55555", network: "hedera:testnet", autonomyMode: 4, status: "active", cadenceMinutes: 15 };
+const agentProfile = { id: "agent-managed", name: "Agent treasury", kind: "agent_managed", accountId: "0.0.55555", network: "hedera:testnet", autonomyMode: 4, status: "active", cadenceMinutes: 15 };
+const walletA = { id: "user-wallet-0.0.111", name: "Wallet A", kind: "user_wallet", accountId: "0.0.111", network: "hedera:testnet", autonomyMode: 3, status: "paused", cadenceMinutes: 15 };
+const walletB = { id: "user-wallet-0.0.222", name: "Wallet B", kind: "user_wallet", accountId: "0.0.222", network: "hedera:testnet", autonomyMode: 2, status: "paused", cadenceMinutes: 15 };
 
-function stateWithProfile(): State {
+function stateWithProfile(extra: Profile[] = []): State {
   return {
-    profiles: [{ ...profile }],
+    profiles: [{ ...agentProfile }, ...extra],
+    activeProfileId: "agent-managed",
     events: [
       { id: "observed", sequence: 1, runId: "run-1", kind: "portfolio.observed", title: "Portfolio observed", detail: "Verified Hedera balances", occurredAt: NOW, provenance: "live" },
       { id: "payment", sequence: 2, runId: "run-1", kind: "payment.settled", title: "HBAR price intelligence settled", detail: "x402 payment verified", occurredAt: NOW, provenance: "live", payload: { transactionId: "0.0.1@123.0001" } },
@@ -20,12 +34,17 @@ function stateWithProfile(): State {
     schedule: { cadenceMinutes: 15, paused: false, autonomyMode: 4 },
     mandate: { objective: "Keep HBAR under 60%", limits: { maxPerTrade: 125, maxTradesPerDay: 3, maxPortfolioMovePct: 5, maxDailySpend: 2, allowList: ["HBAR", "USDC", "SAUCE"] } },
     calls: [],
+    accountCalls: [],
   };
 }
 
 const portfolio = { asOf: NOW, totalUsd: "250.00", provenance: "live", assets: [{ symbol: "HBAR", balance: "1200", usdValue: "200", allocationPct: "80", provenance: "live" }, { symbol: "USDC", balance: "50", usdValue: "50", allocationPct: "20", provenance: "live" }, { symbol: "SAUCE", balance: "0", usdValue: "0", allocationPct: "0", provenance: "cached" }] };
 const graph = { ticks: [{ t: Date.parse("2026-07-31T09:30:00.000Z"), price: 0.071, provenance: "live" }, { t: Date.parse(NOW), price: 0.073, provenance: "live" }], markers: [{ t: Date.parse(NOW), eventId: "payment" }] };
 const receipts = [{ id: "receipt-1", kind: "data_purchase", runId: "run-1", occurredAt: NOW, status: "confirmed", symbol: "HBAR", productId: "spot-price", amountHbar: "0.001", transactionId: "0.0.1@123.0001", hashscanUrl: "https://hashscan.io/testnet/transaction/0.0.1@123.0001", provenance: "live" }];
+
+function activeProfile(state: State): Profile {
+  return state.profiles.find((profile) => profile.id === state.activeProfileId) ?? state.profiles[0]!;
+}
 
 async function installApi(page: Page, state: State, slow = false) {
   await page.addInitScript(() => {
@@ -46,6 +65,26 @@ async function installApi(page: Page, state: State, slow = false) {
       streams.forEach((stream) => stream.onmessage?.(message));
     };
   });
+
+  await page.route("**/api/account/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname.replace("/api/account", "");
+    const body = request.postData() ? request.postDataJSON() as Record<string, unknown> : {};
+    state.accountCalls.push({ method: request.method(), path, headers: request.headers(), body });
+    if (request.method() === "POST" && path === "/disconnect") {
+      for (const profile of state.profiles) {
+        if (profile.kind === "user_wallet") profile.status = "paused";
+      }
+      state.activeProfileId = null;
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ disconnected: true, accountId: "0.0.222" }) });
+    }
+    if (request.method() === "POST" && path === "/connect") {
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ accountId: body.accountId, profileId: `user-wallet-${body.accountId}`, needsOnboarding: true, connectedAt: NOW }) });
+    }
+    return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: `Unhandled account endpoint: ${request.method()} ${path}` }) });
+  });
+
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -54,8 +93,43 @@ async function installApi(page: Page, state: State, slow = false) {
     state.calls.push({ method: request.method(), path, headers: request.headers(), body });
     const json = (value: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
     if (slow && path === "/profiles") await new Promise((resolve) => setTimeout(resolve, 300));
-    if (request.method() === "GET" && path === "/profiles") return json(state.profiles);
-    if (request.method() === "GET" && path.endsWith("/dashboard")) return json({ profile: { ...profile, ...state.profiles[0], status: state.halted ? "halted" : state.schedule.paused ? "paused" : "active" }, portfolio, events: state.events, pendingProposals: state.proposals, spend: { dataHbar: "0.001", dataTodayHbar: "0.001", tradeHbar: "0", tradeTodayHbar: "0", networkHbar: "0.0001" }, system: { halted: state.halted }, mandate: state.mandate, schedule: state.schedule, runs: [{ id: "run-1", status: "completed", objective: state.mandate.objective as string }] });
+    if (request.method() === "GET" && path === "/profiles") {
+      return json({ profiles: state.profiles, activeProfileId: state.activeProfileId, account: null });
+    }
+    if (request.method() === "POST" && /\/profiles\/[^/]+\/activate$/.test(path)) {
+      const profileId = path.split("/")[2]!;
+      for (const profile of state.profiles) profile.status = profile.id === profileId ? "active" : "paused";
+      state.activeProfileId = profileId;
+      const profile = activeProfile(state);
+      if (profile.kind === "agent_managed") state.schedule.autonomyMode = 4;
+      else state.schedule.autonomyMode = Number(profile.autonomyMode ?? 3) as 1 | 2 | 3 | 4;
+      return json({ profile, activeProfileId: profileId });
+    }
+    if (request.method() === "GET" && path === "/onboarding") {
+      return json({
+        connectedAccountId: null,
+        userProfileId: state.profiles.find((profile) => profile.kind === "user_wallet")?.id ?? null,
+        agentProfileId: state.profiles.find((profile) => profile.kind === "agent_managed")?.id ?? null,
+        activeProfileId: state.activeProfileId,
+        sessions: state.profiles.filter((profile) => profile.id !== "connected-wallet"),
+        agentTreasury: { accountId: "0.0.55555", hbarFormatted: 12, funded: true, signerReady: true },
+        autonomyMode: state.schedule.autonomyMode,
+      });
+    }
+    if (request.method() === "GET" && path.endsWith("/dashboard")) {
+      const profile = activeProfile(state);
+      return json({
+        profile: { ...profile, status: state.halted ? "halted" : state.schedule.paused ? "paused" : profile.status },
+        portfolio,
+        events: state.events,
+        pendingProposals: state.proposals,
+        spend: { dataHbar: "0.001", dataTodayHbar: "0.001", tradeHbar: "0", tradeTodayHbar: "0", networkHbar: "0.0001" },
+        system: { halted: state.halted },
+        mandate: state.mandate,
+        schedule: state.schedule,
+        runs: [{ id: "run-1", status: "completed", objective: state.mandate.objective as string }],
+      });
+    }
     if (request.method() === "GET" && path.endsWith("/graph?series=HBAR")) return json(graph);
     if (request.method() === "GET" && path.endsWith("/receipts")) return json({ receipts });
     if (request.method() === "POST" && path.endsWith("/runs")) { state.events.push({ id: "manual", sequence: state.events.length + 1, runId: "run-manual", kind: "run.triggered", title: "Manual check-in started", detail: "Server accepted the idempotent run.", occurredAt: NOW, provenance: "live" }); return json({ accepted: true }); }
@@ -69,21 +143,37 @@ async function installApi(page: Page, state: State, slow = false) {
 }
 
 test("keeps empty and connect states honest when no authenticated profile exists", async ({ page }) => {
-  await installApi(page, { ...stateWithProfile(), profiles: [] }, true);
+  await installApi(page, { ...stateWithProfile(), profiles: [], activeProfileId: null }, true);
   await page.goto("/");
   await expect(page.getByText("Connect an account to begin")).toBeVisible();
-  await expect(page.getByRole("link", { name: "Pick a wallet" })).toBeVisible();
-  await page.getByRole("link", { name: "Pick a wallet" }).click();
-  await expect(page).toHaveURL(/\/connect$/);
-  await expect(page.getByRole("heading", { name: /Connect an account to begin|How should the agent work/ })).toBeVisible();
-  await expect(page.getByText(/WalletConnect is ready for Hedera testnet|WalletConnect is not enabled in this deployment/)).toBeVisible();
-  const hashPack = page.getByRole("button", { name: "HashPack" });
-  if (await hashPack.count()) {
-    await expect(hashPack).toBeVisible();
-    if (await hashPack.isEnabled()) {
-      await expect(page.getByText("WalletConnect is ready for Hedera testnet")).toBeVisible();
-    }
-  }
+  await expect(page.getByRole("link", { name: "New session" })).toBeVisible();
+  await page.getByRole("link", { name: "New session" }).click();
+  await expect(page).toHaveURL(/\/connect/);
+  await expect(page.getByRole("heading", { name: /Start a new session|How should money move/ })).toBeVisible();
+  await expect(page.getByText(/WalletConnect is ready for Hedera testnet|WalletConnect is not enabled/)).toBeVisible();
+});
+
+test("switches sessions and disconnects the active wallet from the header menu", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium", "Session menu coverage is desktop-first.");
+  const state = stateWithProfile([{ ...walletA }, { ...walletB, status: "active" }]);
+  state.activeProfileId = "user-wallet-0.0.222";
+  state.schedule.autonomyMode = 2;
+  await installApi(page, state);
+  await page.goto("/");
+
+  await expect(page.getByRole("button", { name: /0\.0\.222/ }).first()).toBeVisible();
+  await page.getByRole("button", { name: /0\.0\.222/ }).first().click();
+  await expect(page.getByRole("menu")).toBeVisible();
+  await page.getByRole("menuitem", { name: /0\.0\.111/ }).click();
+  await expect.poll(() => state.activeProfileId).toBe("user-wallet-0.0.111");
+  await expect(page.getByRole("button", { name: /0\.0\.111/ }).first()).toBeVisible();
+  expect(state.calls.some((call) => call.method === "POST" && call.path === "/profiles/user-wallet-0.0.111/activate")).toBeTruthy();
+
+  await page.getByRole("button", { name: /0\.0\.111/ }).first().click();
+  await page.getByRole("menuitem", { name: "Disconnect wallet" }).click();
+  await expect.poll(() => state.accountCalls.some((call) => call.path === "/disconnect")).toBeTruthy();
+  await expect(page.getByText("Connect an account to begin")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Resume 0\.0\.111|Resume 0\.0\.222|choose session/ }).first()).toBeVisible();
 });
 
 test("uses the current dashboard, graph drawer, source receipt, modes, limits, schedule, composer, and SSE", async ({ page }, testInfo) => {

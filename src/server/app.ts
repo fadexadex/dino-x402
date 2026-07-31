@@ -14,6 +14,7 @@ import { AgentRunner } from "../agent/runner.js";
 import { MultiAssetAgentRunner } from "../agent/multi-runner.js";
 import { agentScheduler } from "../scheduler/index.js";
 import { store } from "../store/index.js";
+import { findUserWalletForAccount, resolveActiveProfile, userWalletProfileId } from "../store/sessions.js";
 import { sseBroadcaster } from "./stream.js";
 import { readPortfolio } from "../portfolio/reader.js";
 import { executeSaucerSwap } from "../trading/executor.js";
@@ -282,7 +283,8 @@ export const createApp = (
 
   app.get("/api/v1/profiles", (c) => {
     const schedule = store.getState().schedule;
-    const profiles = (store.getState().profiles ?? []).map((profile) => {
+    const state = store.getState();
+    const profiles = (state.profiles ?? []).map((profile) => {
       if (profile.kind !== "agent_managed") return profile;
       return {
         ...profile,
@@ -291,7 +293,46 @@ export const createApp = (
         autonomyMode: schedule.autonomousTrading ? 4 as const : (profile.autonomyMode ?? 3),
       };
     });
-    return c.json(jsonSafe(profiles));
+    return c.json(jsonSafe({
+      profiles,
+      activeProfileId: state.activeProfileId ?? resolveActiveProfile(state)?.id ?? null,
+      account: state.account,
+    }));
+  });
+
+  app.post("/api/v1/profiles/:profileId/activate", (c) => {
+    const profile = store.getProfile(c.req.param("profileId"));
+    if (!profile) return c.json({ error: "Profile not found" }, 404);
+    const now = new Date().toISOString();
+    for (const other of store.getState().profiles ?? []) {
+      if (other.id === profile.id) continue;
+      if (other.status === "active") {
+        store.upsertProfile({ ...other, status: "paused", updatedAt: now });
+      }
+    }
+    const activated = store.upsertProfile({ ...profile, status: "active", updatedAt: now });
+    store.setActiveProfileId(activated.id);
+    if (activated.kind === "user_wallet") {
+      store.setAccount({
+        accountId: activated.accountId,
+        label: activated.name,
+        connectedAt: now,
+      });
+      store.updateSchedule({
+        enabled: (activated.autonomyMode ?? 1) >= 2,
+        autonomousTrading: false,
+      });
+      if ((activated.autonomyMode ?? 1) >= 2) agentScheduler.start();
+      else agentScheduler.stop();
+    } else {
+      store.updateSchedule({
+        enabled: true,
+        autonomousTrading: (activated.autonomyMode ?? 4) === 4,
+      });
+      agentScheduler.start();
+    }
+    sseBroadcaster.broadcast("session.activated", { profileId: activated.id }, { profileId: activated.id });
+    return c.json(jsonSafe({ profile: activated, activeProfileId: activated.id }));
   });
 
   app.get("/api/v1/profiles/:profileId", (c) => {
@@ -746,27 +787,48 @@ export const createApp = (
       const now = new Date().toISOString();
       const account = {
         accountId: body.accountId,
-        label: body.label ?? "Connected wallet",
+        label: body.label ?? `Wallet ${body.accountId}`,
         connectedAt: now,
       };
       store.setAccount(account);
 
-      // Always use the stable connected-wallet profile — never reuse synthetic test ids.
-      const existing = store.getProfile("connected-wallet");
+      const profileId = userWalletProfileId(body.accountId);
+      const existing =
+        store.getProfile(profileId) ??
+        (store.getProfile("connected-wallet")?.accountId === body.accountId
+          ? store.getProfile("connected-wallet")
+          : null);
+
+      // Pause every other custody session so this wallet becomes the active one.
+      for (const other of store.getState().profiles ?? []) {
+        if (other.id === profileId || other.id === "connected-wallet") continue;
+        if (other.status === "active") {
+          store.upsertProfile({ ...other, status: "paused", updatedAt: now });
+        }
+      }
+
       const profile: PortfolioProfile = {
-        id: "connected-wallet",
-        name: body.label ?? "Connected wallet",
+        id: profileId,
+        name: body.label ?? `Wallet ${body.accountId}`,
         kind: "user_wallet",
         accountId: body.accountId,
         network: config.hederaNetwork,
         status: "paused",
         // Connect always restarts onboarding; autonomy is chosen in /api/v1/onboarding/complete.
-        autonomyMode: 1,
+        autonomyMode: existing?.autonomyMode ?? 1,
         cadenceMinutes: existing?.cadenceMinutes ?? store.getState().schedule.intervalMinutes,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
+        ...(existing?.mandateId ? { mandateId: existing.mandateId } : {}),
       };
       store.upsertProfile(profile);
+      // Keep the legacy connected-wallet row synced for older readers.
+      store.upsertProfile({
+        ...profile,
+        id: "connected-wallet",
+        name: body.label ?? "Connected wallet",
+      });
+      store.setActiveProfileId(profileId);
       if (!store.getLatestMandate(profile.id)) {
         store.saveMandate({
           id: `${profile.id}-mandate-v1`,
@@ -789,12 +851,43 @@ export const createApp = (
     }
   });
 
+  app.post("/api/account/disconnect", (c) => {
+    const state = store.getState();
+    const account = state.account;
+    const now = new Date().toISOString();
+    const active = resolveActiveProfile(state);
+    for (const profile of state.profiles ?? []) {
+      if (profile.kind !== "user_wallet") continue;
+      if (account && profile.accountId !== account.accountId) continue;
+      if (profile.status === "active" || profile.id === "connected-wallet" || profile.id === active?.id) {
+        store.upsertProfile({ ...profile, status: "paused", updatedAt: now });
+      }
+    }
+    store.clearAccount();
+    if (!active || active.kind === "user_wallet") {
+      store.setActiveProfileId(null);
+    }
+    sseBroadcaster.broadcast("account.disconnected", { accountId: account?.accountId ?? null });
+    return c.json({ disconnected: true, accountId: account?.accountId ?? null });
+  });
+
   app.get("/api/account", (c) => c.json(store.getState().account));
 
   app.get("/api/v1/onboarding", async (c) => {
-    const account = store.getState().account;
-    const userWallet = (store.getState().profiles ?? []).find((profile) => profile.kind === "user_wallet");
-    const agentProfile = (store.getState().profiles ?? []).find((profile) => profile.kind === "agent_managed");
+    const state = store.getState();
+    const account = state.account;
+    const userWallet = findUserWalletForAccount(state, account?.accountId);
+    const agentProfile = (state.profiles ?? []).find((profile) => profile.kind === "agent_managed");
+    const sessions = (state.profiles ?? [])
+      .filter((profile) => profile.id !== "connected-wallet")
+      .map((profile) => ({
+        id: profile.id,
+        name: profile.name,
+        kind: profile.kind,
+        accountId: profile.accountId,
+        status: profile.status,
+        autonomyMode: profile.autonomyMode ?? null,
+      }));
     // Agent treasury is always the server-managed env account (HEDERA_CLIENT_ID).
     const agentAccountId = config.agentPayerId ?? null;
     let agentTreasury: { accountId: string; hbarFormatted: number; funded: boolean; signerReady: boolean } | null = null;
@@ -820,6 +913,8 @@ export const createApp = (
       connectedAccountId: account?.accountId ?? null,
       userProfileId: userWallet?.id ?? null,
       agentProfileId: agentProfile?.id ?? null,
+      activeProfileId: state.activeProfileId ?? resolveActiveProfile(state)?.id ?? null,
+      sessions,
       agentTreasury,
       autonomyMode: userWallet?.autonomyMode ?? agentProfile?.autonomyMode ?? null,
     }));
@@ -832,7 +927,8 @@ export const createApp = (
         return c.json({ error: "autonomyMode must be 1, 2, 3, or 4" }, 400);
       }
       const now = new Date().toISOString();
-      const userWallet = (store.getState().profiles ?? []).find((profile) => profile.kind === "user_wallet");
+      const state = store.getState();
+      const userWallet = findUserWalletForAccount(state, state.account?.accountId);
       if (!userWallet && body.autonomyMode !== 4) {
         return c.json({ error: "Connect a wallet before choosing this autonomy mode" }, 400);
       }
@@ -899,23 +995,38 @@ export const createApp = (
           const previous = store.getLatestMandate(updated.id);
           if (previous) store.saveMandate({ ...previous, id: crypto.randomUUID(), version: previous.version + 1, objective: body.objective, createdAt: now });
         }
-        // Pause any prior user-wallet profile so the dashboard prefers the agent treasury.
-        if (userWallet && userWallet.status === "active") {
-          store.upsertProfile({ ...userWallet, status: "paused", updatedAt: now });
+        // Pause every user-wallet session so the dashboard prefers the agent treasury.
+        for (const wallet of store.getState().profiles ?? []) {
+          if (wallet.kind === "user_wallet" && wallet.status === "active") {
+            store.upsertProfile({ ...wallet, status: "paused", updatedAt: now });
+          }
         }
+        store.setActiveProfileId(updated.id);
         sseBroadcaster.broadcast("profile.schedule.updated", { autonomyMode: 4 }, { profileId: updated.id });
         return c.json(jsonSafe({ profile: updated, autonomyMode: 4, custody: "agent_managed" }));
       }
 
+      // Pause siblings so only this wallet session is live.
+      for (const other of store.getState().profiles ?? []) {
+        if (other.id === userWallet!.id) continue;
+        if (other.status === "active") {
+          store.upsertProfile({ ...other, status: "paused", updatedAt: now });
+        }
+      }
       const profile = store.upsertProfile({
         ...userWallet!,
         status: "active",
         autonomyMode: body.autonomyMode,
         updatedAt: now,
       });
-      // Keep agent treasury inactive while living in approval-gated wallet custody.
-      const agentManaged = (store.getState().profiles ?? []).find((item) => item.kind === "agent_managed" && item.status === "active");
-      if (agentManaged) store.upsertProfile({ ...agentManaged, status: "paused", updatedAt: now });
+      if (profile.id !== "connected-wallet") {
+        store.upsertProfile({
+          ...profile,
+          id: "connected-wallet",
+          name: "Connected wallet",
+        });
+      }
+      store.setActiveProfileId(profile.id);
       store.updateSchedule({
         enabled: body.autonomyMode >= 2,
         autonomousTrading: false,

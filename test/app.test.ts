@@ -60,7 +60,7 @@ describe("resource server pre-validation (offline)", () => {
 });
 
 describe("wallet account connect (offline)", () => {
-  it("creates a user_wallet profile from a Hedera account id", async () => {
+  it("creates a per-wallet user_wallet profile from a Hedera account id", async () => {
     const accountId = `0.0.${Math.floor(Math.random() * 1_000_000_000)}`;
     const res = await app.request("/api/account/connect", {
       method: "POST",
@@ -70,9 +70,11 @@ describe("wallet account connect (offline)", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { accountId: string; profileId: string };
     expect(body.accountId).toBe(accountId);
+    expect(body.profileId).toBe(`user-wallet-${accountId}`);
     const profile = store.getProfile(body.profileId);
     expect(profile).toMatchObject({ kind: "user_wallet", accountId, autonomyMode: 1, status: "paused" });
     expect(store.getLatestMandate(body.profileId)?.profileId).toBe(body.profileId);
+    expect(store.getState().activeProfileId).toBe(body.profileId);
   });
 
   it("completes approval-gated onboarding without enabling autonomous trading", async () => {
@@ -91,6 +93,57 @@ describe("wallet account connect (offline)", () => {
     const body = await res.json() as { autonomyMode: number; custody: string; approvalRequired: boolean };
     expect(body).toMatchObject({ autonomyMode: 3, custody: "user_wallet", approvalRequired: true });
     expect(store.getState().schedule.autonomousTrading).toBe(false);
+  });
+
+  it("keeps multiple wallet sessions and can disconnect then switch", async () => {
+    const first = `0.0.${Math.floor(Math.random() * 1_000_000_000)}`;
+    const second = `0.0.${Math.floor(Math.random() * 1_000_000_000)}`;
+
+    await app.request("/api/account/connect", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accountId: first }),
+    });
+    await app.request("/api/v1/onboarding/complete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ autonomyMode: 2 }),
+    });
+
+    await app.request("/api/account/connect", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accountId: second }),
+    });
+    await app.request("/api/v1/onboarding/complete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ autonomyMode: 3 }),
+    });
+
+    const firstProfile = store.getProfile(`user-wallet-${first}`);
+    const secondProfile = store.getProfile(`user-wallet-${second}`);
+    expect(firstProfile?.status).toBe("paused");
+    expect(secondProfile?.status).toBe("active");
+    expect(store.getState().account?.accountId).toBe(second);
+
+    const disconnect = await app.request("/api/account/disconnect", { method: "POST" });
+    expect(disconnect.status).toBe(200);
+    expect(store.getState().account).toBeNull();
+    expect(store.getProfile(`user-wallet-${second}`)?.status).toBe("paused");
+
+    const activate = await app.request(`/api/v1/profiles/user-wallet-${first}/activate`, { method: "POST" });
+    expect(activate.status).toBe(200);
+    const activated = await activate.json() as { activeProfileId: string };
+    expect(activated.activeProfileId).toBe(`user-wallet-${first}`);
+    expect(store.getProfile(`user-wallet-${first}`)?.status).toBe("active");
+    expect(store.getState().account?.accountId).toBe(first);
+
+    const listed = await app.request("/api/v1/profiles");
+    const listedBody = await listed.json() as { profiles: Array<{ id: string }>; activeProfileId: string };
+    expect(listedBody.activeProfileId).toBe(`user-wallet-${first}`);
+    expect(listedBody.profiles.some((profile) => profile.id === `user-wallet-${first}`)).toBe(true);
+    expect(listedBody.profiles.some((profile) => profile.id === `user-wallet-${second}`)).toBe(true);
   });
 });
 

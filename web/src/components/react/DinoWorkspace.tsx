@@ -8,6 +8,7 @@ import { AutonomyDial } from "@/components/agent/AutonomyDial";
 import { WatchStatus } from "@/components/agent/WatchStatus";
 import { KillSwitch } from "@/components/agent/KillSwitch";
 import { RunsRail } from "@/components/agent/RunsRail";
+import { SessionSwitcher } from "@/components/agent/SessionSwitcher";
 import { Composer } from "@/components/agent/Composer";
 import { Inspector, type InspectorView } from "@/components/agent/Inspector";
 import { ThinkingTrace } from "@/components/kit/ThinkingTrace";
@@ -17,6 +18,7 @@ import { useVariant, useVariants } from "@/lib/variants";
 import { api } from "@/lib/agent-api";
 import { isConclusionKind, isStreamMetaKind, isUserFacingKind, toEvent, toHoldings, toProposal } from "@/lib/agent-view";
 import { signAndExecuteSwap } from "@/lib/wallet-sign";
+import { disconnectWallet } from "@/lib/wallet";
 import { useAgentDashboard } from "./useAgentDashboard";
 
 type ChatItem =
@@ -39,6 +41,7 @@ export function DinoWorkspace() {
   const [sending, setSending] = useState(false);
   const [approving, setApproving] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [sessionBusy, setSessionBusy] = useState(false);
   const [localUserMessages, setLocalUserMessages] = useState<Array<{ id: string; at: number; text: string }>>([]);
   const [thoughtStartedAt, setThoughtStartedAt] = useState<number | null>(null);
   const proposalVariant = useVariant("proposal");
@@ -86,9 +89,36 @@ export function DinoWorkspace() {
     [rawEvents],
   );
   const halted = Boolean(data?.system?.halted || profile?.status === "halted");
-  const connected = Boolean(profile?.accountId);
+  const connected = Boolean(profile?.accountId && profile?.status === "active");
   const awaiting = Boolean(proposal);
   const working = sending || data?.runs?.[0]?.status === "running";
+  const disconnectSession = async () => {
+    setSessionBusy(true);
+    setSendError(null);
+    try {
+      await api.disconnectAccount();
+      await disconnectWallet();
+      setLocalUserMessages([]);
+      await refresh();
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : "Could not disconnect the wallet session.");
+    } finally {
+      setSessionBusy(false);
+    }
+  };
+  const activateSession = async (profileId: string) => {
+    setSessionBusy(true);
+    setSendError(null);
+    try {
+      await api.activateProfile(profileId);
+      setLocalUserMessages([]);
+      await refresh();
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : "Could not switch sessions.");
+    } finally {
+      setSessionBusy(false);
+    }
+  };
   const run = {
     events: baseEvents.filter((event) => !isStreamMetaKind(event.kind ?? "") && !isConclusionKind(event.kind ?? "")),
     ticks: data?.graph?.ticks?.map((tick) => ({ ...tick, provenance: tick.provenance === "stale" ? "fallback" as const : tick.provenance })) ?? [],
@@ -97,7 +127,7 @@ export function DinoWorkspace() {
     connected,
     phase: awaiting ? "awaiting" as const : working ? "running" as const : "idle" as const,
     connect: refresh,
-    disconnect: refresh,
+    disconnect: () => void disconnectSession(),
     approve: async () => {
       if (!proposal || approving) return;
       setApproving(true);
@@ -341,14 +371,15 @@ export function DinoWorkspace() {
           <DinoMark />
           <span className="text-[13.5px] font-semibold tracking-[-0.01em]">Dino Agent</span>
         </span>
-        <button
-          type="button"
-          onClick={() => { window.location.href = "/connect"; }}
-          className="flex items-center gap-1.5 rounded-full border border-line bg-card px-2.5 py-1 font-mono text-[11px] text-ink-3 transition-colors hover:bg-hover"
-        >
-          <span className={`size-1.5 rounded-full ${run.connected ? "bg-green" : "bg-ink-3"}`} />
-          {run.connected ? `${profile?.accountId} · ${profile?.network ?? "testnet"}` : "connect wallet"}
-        </button>
+        <SessionSwitcher
+          profiles={data?.profiles ?? []}
+          activeProfileId={data?.activeProfileId ?? profile?.id}
+          connected={run.connected}
+          busy={sessionBusy}
+          onActivate={(profileId) => activateSession(profileId)}
+          onDisconnect={() => disconnectSession()}
+          onNewSession={() => { window.location.href = "/connect?new=1"; }}
+        />
         <div className="ml-auto flex items-center gap-2">
           <WatchStatus
             lastCheckIn={lastCheckIn}
@@ -494,16 +525,26 @@ export function DinoWorkspace() {
                         Connect an account to begin
                       </p>
                       <p className="mx-auto mt-1.5 max-w-md text-[12.5px] leading-relaxed text-ink-2">
-                        Connect a wallet for approval-gated modes, or enable the autonomous agent treasury without WalletConnect.
+                        Start a new session with a wallet for approval-gated modes, switch into a saved session, or enable the autonomous agent treasury.
                       </p>
-                      <div className="mt-3 flex items-center justify-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => void run.connect()}
+                      <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                        {(data?.profiles ?? []).filter((item) => item.id !== "connected-wallet" && item.status !== "active").slice(0, 3).map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            disabled={sessionBusy}
+                            onClick={() => void activateSession(item.id)}
+                            className="rounded-control border border-line px-3 py-1.5 font-mono text-[12px] text-ink-2 hover:bg-hover"
+                          >
+                            Resume {item.accountId}
+                          </button>
+                        ))}
+                        <a
+                          href="/connect?new=1"
                           className="rounded-control bg-ink px-3 py-1.5 text-[12.5px] font-medium text-background"
                         >
-                          Refresh profile
-                        </button>
+                          New session
+                        </a>
                         <a
                           href="/connect"
                           className="rounded-control border border-line px-3 py-1.5 text-[12.5px] text-ink-2 hover:bg-hover"

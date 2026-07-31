@@ -89,6 +89,7 @@ export type Receipt = {
 export type DashboardSnapshot = {
   profile?: PortfolioProfile;
   profiles?: PortfolioProfile[];
+  activeProfileId?: string | null;
   portfolio?: PortfolioSnapshot;
   events?: RunEvent[];
   pendingProposals?: Proposal[];
@@ -107,6 +108,18 @@ export type DashboardSnapshot = {
 };
 
 const API = "/api/v1";
+const ACTIVE_PROFILE_KEY = "dino.activeProfileId";
+
+export function getPreferredProfileId(): string | null {
+  if (typeof localStorage === "undefined") return null;
+  return localStorage.getItem(ACTIVE_PROFILE_KEY);
+}
+
+export function setPreferredProfileId(profileId: string | null): void {
+  if (typeof localStorage === "undefined") return;
+  if (profileId) localStorage.setItem(ACTIVE_PROFILE_KEY, profileId);
+  else localStorage.removeItem(ACTIVE_PROFILE_KEY);
+}
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, {
@@ -121,23 +134,43 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.status === 204 ? (undefined as T) : (response.json() as Promise<T>);
 }
 
-export async function loadDashboard(): Promise<DashboardSnapshot> {
-  const profiles = await request<PortfolioProfile[] | { profiles: PortfolioProfile[] }>("/profiles");
-  const list = Array.isArray(profiles) ? profiles : profiles.profiles;
-  if (!list.length) return { profiles: [] };
-  const profile =
-    list.find((item) => item.id === "connected-wallet" && item.status === "active") ??
-    list.find((item) => item.kind === "agent_managed" && item.status === "active") ??
-    list.find((item) => item.id === "connected-wallet") ??
-    list.find((item) => item.kind === "user_wallet" && item.status === "active") ??
-    list.find((item) => item.kind === "user_wallet") ??
-    list[0];
+function pickProfile(list: PortfolioProfile[], preferredId?: string | null, serverActiveId?: string | null): PortfolioProfile | undefined {
+  const visible = list.filter((item) => item.id !== "connected-wallet");
+  const pool = visible.length ? visible : list;
+  return (
+    (preferredId ? pool.find((item) => item.id === preferredId) : undefined) ??
+    (serverActiveId ? pool.find((item) => item.id === serverActiveId) : undefined) ??
+    pool.find((item) => item.status === "active") ??
+    pool.find((item) => item.kind === "agent_managed" && item.status === "active") ??
+    pool.find((item) => item.kind === "user_wallet" && item.status === "active") ??
+    pool.find((item) => item.kind === "user_wallet") ??
+    pool.find((item) => item.kind === "agent_managed") ??
+    pool[0]
+  );
+}
+
+export async function loadDashboard(preferredProfileId?: string | null): Promise<DashboardSnapshot> {
+  const profilesResponse = await request<PortfolioProfile[] | { profiles: PortfolioProfile[]; activeProfileId?: string | null }>("/profiles");
+  const list = Array.isArray(profilesResponse) ? profilesResponse : profilesResponse.profiles;
+  const serverActiveId = Array.isArray(profilesResponse) ? null : profilesResponse.activeProfileId ?? null;
+  if (!list.length) return { profiles: [], activeProfileId: null };
+  const preferred = preferredProfileId ?? getPreferredProfileId();
+  const profile = pickProfile(list, preferred, serverActiveId);
+  if (!profile) return { profiles: list, activeProfileId: serverActiveId };
+  setPreferredProfileId(profile.id);
   const [dashboard, graph, receiptResult] = await Promise.all([
     request<DashboardSnapshot>(`/profiles/${profile.id}/dashboard`),
     request<DashboardSnapshot["graph"]>(`/profiles/${profile.id}/graph?series=HBAR`).catch(() => undefined),
     request<{ receipts: Receipt[] }>(`/profiles/${profile.id}/receipts`).catch(() => ({ receipts: [] })),
   ]);
-  return { ...dashboard, profile: { ...profile, ...dashboard.profile }, profiles: list, graph, receipts: receiptResult.receipts };
+  return {
+    ...dashboard,
+    profile: { ...profile, ...dashboard.profile },
+    profiles: list,
+    activeProfileId: profile.id,
+    graph,
+    receipts: receiptResult.receipts,
+  };
 }
 
 export const api = {
@@ -160,6 +193,24 @@ export const api = {
   resume: () => request("/system/resume", { method: "POST" }),
   setSchedule: (profileId: string, cadenceMinutes: number, paused: boolean, autonomyMode?: 1 | 2 | 3 | 4) => request(`/profiles/${profileId}/schedule`, { method: "PATCH", body: JSON.stringify({ cadenceMinutes, paused, ...(autonomyMode === undefined ? {} : { autonomyMode }) }) }),
   updateMandate: (profileId: string, patch: Record<string, unknown>) => request(`/profiles/${profileId}/mandate`, { method: "PATCH", body: JSON.stringify(patch) }),
+  activateProfile: async (profileId: string) => {
+    const result = await request<{ profile: PortfolioProfile; activeProfileId: string }>(`/profiles/${profileId}/activate`, { method: "POST" });
+    setPreferredProfileId(result.activeProfileId);
+    return result;
+  },
+  disconnectAccount: async () => {
+    const response = await fetch("/api/account/disconnect", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { error?: string; message?: string } | null;
+      throw new Error(body?.error || body?.message || `Disconnect failed (${response.status})`);
+    }
+    setPreferredProfileId(null);
+    return response.json() as Promise<{ disconnected: boolean; accountId: string | null }>;
+  },
   connectAccount: async (accountId: string, label?: string) => {
     const response = await fetch("/api/account/connect", {
       method: "POST",
@@ -171,12 +222,23 @@ export const api = {
       const body = await response.json().catch(() => null) as { error?: string; message?: string } | null;
       throw new Error(body?.error || body?.message || `Connect failed (${response.status})`);
     }
-    return response.json() as Promise<{ accountId: string; profileId?: string; label?: string; connectedAt: string; needsOnboarding?: boolean }>;
+    const result = await response.json() as { accountId: string; profileId?: string; label?: string; connectedAt: string; needsOnboarding?: boolean };
+    if (result.profileId) setPreferredProfileId(result.profileId);
+    return result;
   },
   getOnboarding: () => request<{
     connectedAccountId: string | null;
     userProfileId: string | null;
     agentProfileId: string | null;
+    activeProfileId?: string | null;
+    sessions?: Array<{
+      id: string;
+      name: string;
+      kind: "user_wallet" | "agent_managed";
+      accountId: string;
+      status: string;
+      autonomyMode: 1 | 2 | 3 | 4 | null;
+    }>;
     agentTreasury: { accountId: string; hbarFormatted: number; funded: boolean; signerReady: boolean } | null;
     autonomyMode: 1 | 2 | 3 | 4 | null;
   }>("/onboarding"),
@@ -199,6 +261,7 @@ export const api = {
     if (!response.ok) {
       throw Object.assign(new Error(body?.error || `Onboarding failed (${response.status})`), { body, status: response.status });
     }
+    if (body?.profile?.id) setPreferredProfileId(body.profile.id);
     return body!;
   },
 };

@@ -77,10 +77,14 @@ export function getConnectedAccountId(connector: DAppConnector): string | null {
 }
 
 /** Opens the WalletConnect modal and returns the approved Hedera account ID. */
-export async function connectWallet(): Promise<string> {
+export async function connectWallet(options?: { force?: boolean }): Promise<string> {
   const connector = await getConnector();
-  const existing = getConnectedAccountId(connector);
-  if (existing) return existing;
+  if (options?.force) {
+    await disconnectWallet();
+  } else {
+    const existing = getConnectedAccountId(connector);
+    if (existing) return existing;
+  }
 
   await connector.openModal(undefined, true);
   const accountId = getConnectedAccountId(connector);
@@ -92,8 +96,12 @@ export async function connectWallet(): Promise<string> {
 
 export async function disconnectWallet(): Promise<void> {
   if (!connectorPromise) return;
-  const connector = await connectorPromise;
-  if (connector.walletConnectClient) {
-    await connector.disconnectAll();
+  try {
+    const connector = await connectorPromise;
+    if (connector.walletConnectClient) {
+      await connector.disconnectAll();
+    }
+  } catch {
+    // Wallet already gone — treat as disconnected.
   }
 }
