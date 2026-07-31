@@ -1,0 +1,65 @@
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "background": "#ffffff",
+    "primaryColor": "#eef2ff",
+    "primaryTextColor": "#111827",
+    "primaryBorderColor": "#4338ca",
+    "secondaryColor": "#ecfdf5",
+    "secondaryTextColor": "#111827",
+    "tertiaryColor": "#fff7ed",
+    "tertiaryTextColor": "#111827",
+    "lineColor": "#374151",
+    "textColor": "#111827",
+    "mainBkg": "#ffffff",
+    "actorBkg": "#eef2ff",
+    "actorBorder": "#4338ca",
+    "actorTextColor": "#111827",
+    "actorLineColor": "#6b7280",
+    "signalColor": "#111827",
+    "signalTextColor": "#111827",
+    "labelBoxBkgColor": "#ffffff",
+    "labelBoxBorderColor": "#374151",
+    "labelTextColor": "#111827",
+    "loopTextColor": "#111827",
+    "noteBkgColor": "#fef3c7",
+    "noteTextColor": "#111827",
+    "noteBorderColor": "#d97706",
+    "activationBkgColor": "#dbeafe",
+    "activationBorderColor": "#2563eb",
+    "sequenceNumberColor": "#ffffff",
+    "altBackground": "#f3f4f6",
+    "fontFamily": "Inter, Segoe UI, sans-serif"
+  }
+}}%%
+sequenceDiagram
+  participant U as You
+  participant A as Portfolio agent
+  participant S as Market-data shop
+  participant F as Blocky402
+  participant H as Hedera testnet
+  participant C as CoinGecko
+  participant D as SaucerSwap
+
+  U->>A: Start a check-in
+  A->>A: Read live wallet balances
+  A->>S: Ask for HBAR price
+  S-->>A: Payment required (HTTP 402)
+  A->>F: Pay tiny HBAR amount
+  F->>H: Settle payment on-chain
+  H-->>A: Payment confirmed
+  A->>S: Retry with proof of payment
+  S->>C: Fetch live price
+  C-->>S: Price + 24h change
+  S-->>A: Unlock market data
+  Note over A: Repeat for USDC and SAUCE
+  A->>A: Compare mix to target bands
+  alt Mix needs a rebalance
+    A->>D: Get live exchange quote
+    A->>D: Submit swap (auto or after your approval)
+    D->>H: Swap settles on Hedera
+    A->>A: Refresh portfolio balances
+  else Mix looks healthy
+    A-->>U: No trade needed
+  end
+  A-->>U: Conclusion + HashScan receipts

@@ -1,0 +1,72 @@
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "background": "#ffffff",
+    "primaryColor": "#eef2ff",
+    "primaryTextColor": "#111827",
+    "primaryBorderColor": "#4338ca",
+    "secondaryColor": "#ecfdf5",
+    "secondaryTextColor": "#111827",
+    "secondaryBorderColor": "#047857",
+    "tertiaryColor": "#fff7ed",
+    "tertiaryTextColor": "#111827",
+    "tertiaryBorderColor": "#c2410c",
+    "lineColor": "#374151",
+    "textColor": "#111827",
+    "mainBkg": "#ffffff",
+    "nodeBorder": "#374151",
+    "clusterBkg": "#f8fafc",
+    "clusterBorder": "#94a3b8",
+    "titleColor": "#111827",
+    "edgeLabelBackground": "#ffffff",
+    "actorBkg": "#eef2ff",
+    "actorBorder": "#4338ca",
+    "actorTextColor": "#111827",
+    "actorLineColor": "#6b7280",
+    "signalColor": "#111827",
+    "signalTextColor": "#111827",
+    "labelBoxBkgColor": "#ffffff",
+    "labelBoxBorderColor": "#374151",
+    "labelTextColor": "#111827",
+    "loopTextColor": "#111827",
+    "noteBkgColor": "#fef3c7",
+    "noteTextColor": "#111827",
+    "noteBorderColor": "#d97706",
+    "activationBkgColor": "#dbeafe",
+    "activationBorderColor": "#2563eb",
+    "sequenceNumberColor": "#ffffff",
+    "altBackground": "#f3f4f6",
+    "fontFamily": "Inter, Segoe UI, sans-serif"
+  }
+}}%%
+flowchart TB
+  subgraph People["People using the app"]
+    UI["Dino Agent workbench<br/>browser UI"]
+  end
+
+  subgraph App["This application"]
+    API["API server<br/>port 4021"]
+    AGENT["Portfolio agent<br/>check-in runner"]
+    STORE["Local SQLite store<br/>runs · payments · events"]
+    DATA["Market-data shop<br/>/data/quote · /data/spot-price"]
+  end
+
+  subgraph Outside["Outside services"]
+    CG["CoinGecko<br/>live prices"]
+    FAC["Blocky402<br/>payment helper"]
+    HED["Hedera testnet<br/>payments + swaps"]
+    DEX["SaucerSwap<br/>token exchange"]
+    MIR["Mirror Node<br/>balance lookup"]
+  end
+
+  UI <-->|"live updates"| API
+  API --> AGENT
+  AGENT --> STORE
+  AGENT -->|"1. read balances"| MIR
+  AGENT -->|"2. buy prices via x402"| DATA
+  DATA -->|"3. fetch after payment"| CG
+  DATA -->|"payment settle"| FAC
+  FAC --> HED
+  AGENT -->|"4. maybe rebalance"| DEX
+  DEX --> HED
+  AGENT -->|"5. confirm result"| MIR

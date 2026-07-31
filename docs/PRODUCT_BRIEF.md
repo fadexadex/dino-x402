@@ -1239,7 +1239,6 @@ The following boundaries are intentional or not yet implemented:
 ## 22. Repository and supporting material
 
 - Public repository: <https://github.com/fadexadex/marketrail-x402>
-- Demo runbook: [`docs/DEMO.md`](./DEMO.md)
 - Submission checklist: [`docs/SUBMISSION_CHECKLIST.md`](./SUBMISSION_CHECKLIST.md)
 - Project overview and setup: [`README.md`](../README.md)
 - Latest verified HashScan receipt: <https://hashscan.io/testnet/transaction/0.0.7162784-1785472919-637524384>

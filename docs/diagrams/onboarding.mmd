@@ -1,0 +1,46 @@
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "background": "#ffffff",
+    "primaryColor": "#eef2ff",
+    "primaryTextColor": "#111827",
+    "primaryBorderColor": "#4338ca",
+    "secondaryColor": "#ecfdf5",
+    "secondaryTextColor": "#111827",
+    "tertiaryColor": "#fff7ed",
+    "tertiaryTextColor": "#111827",
+    "lineColor": "#374151",
+    "textColor": "#111827",
+    "mainBkg": "#ffffff",
+    "nodeBorder": "#374151",
+    "clusterBkg": "#f8fafc",
+    "clusterBorder": "#94a3b8",
+    "titleColor": "#111827",
+    "edgeLabelBackground": "#ffffff",
+    "fontFamily": "Inter, Segoe UI, sans-serif"
+  }
+}}%%
+flowchart TB
+  START(["Open /connect"]) --> PATH{"How should money move?"}
+  PATH -->|"I approve each trade"| WALLET["Connect Hedera wallet"]
+  PATH -->|"Agent runs alone"| FUND["Fund agent treasury"]
+  WALLET --> LEVEL{"How hands-on?"}
+  LEVEL --> M1["1 · Watch only"]
+  LEVEL --> M2["2 · Advise me"]
+  LEVEL --> M3["3 · Propose, I approve"]
+  FUND --> M4["4 · Autonomous mode"]
+  M1 --> WS["Open the workspace"]
+  M2 --> WS
+  M3 --> WS
+  M4 --> WS
+  WS --> RUN["Send a portfolio check-in"]
+  RUN --> PAY["Pay for live market data"]
+  PAY --> THINK["Agent shares plain-language thoughts"]
+  THINK --> DECIDE{"Does the mix need a rebalance?"}
+  DECIDE -->|"Mode 3"| APPROVE["You approve in your wallet"]
+  DECIDE -->|"Mode 4"| AUTO["Agent submits the swap"]
+  DECIDE -->|"No"| HOLD["Conclusion: hold"]
+  APPROVE --> REFRESH["Portfolio balances refresh"]
+  AUTO --> REFRESH
+  REFRESH --> DONE["Conclusion + on-chain receipts"]
+  HOLD --> DONE
