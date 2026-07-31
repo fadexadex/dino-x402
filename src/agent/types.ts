@@ -1,4 +1,6 @@
 import type { DataProduct } from "../core/provider.js";
+import type { TradeProposal } from "../trading/types.js";
+import type { Portfolio } from "../portfolio/types.js";
 
 export type AgentEventKind =
   | "catalog.discovered"
@@ -9,7 +11,13 @@ export type AgentEventKind =
   | "payment.settled"
   | "data.received"
   | "analysis.completed"
-  | "run.failed";
+  | "run.failed"
+  | "portfolio.read"
+  | "trade.proposed"
+  | "trade.approved"
+  | "trade.executed"
+  | "trade.verified"
+  | "trade.skipped";
 
 export interface AgentEvent {
   seq: number;

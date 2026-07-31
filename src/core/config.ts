@@ -10,6 +10,15 @@ export interface ServerConfig {
     agentMaxSpendAtomic?: string;
     mistralApiKey?: string;
     mistralModel?: string;
+    tradeMaxAmountTinybar?: string;
+    tradeSlippageBps?: string;
+    mirrorNodeBaseUrl?: string;
+    saucerRouterId?: string;
+    saucerQuoterId?: string;
+    saucerWhbarTokenId?: string;
+    saucerUsdcTokenId?: string;
+    saucerSauceTokenId?: string;
+    saucerFeeTier?: string;
 }
 
 const required = (name: string): string => {
@@ -32,5 +41,14 @@ export const loadConfig = (): ServerConfig => {
         ...(process.env.AGENT_MAX_SPEND_ATOMIC ? { agentMaxSpendAtomic: process.env.AGENT_MAX_SPEND_ATOMIC } : {}),
         ...(process.env.MISTRAL_API_KEY ? { mistralApiKey: process.env.MISTRAL_API_KEY } : {}),
         ...(process.env.MISTRAL_MODEL ? { mistralModel: process.env.MISTRAL_MODEL } : {}),
+        ...(process.env.TRADE_MAX_AMOUNT_TINYBAR ? { tradeMaxAmountTinybar: process.env.TRADE_MAX_AMOUNT_TINYBAR } : {}),
+        ...(process.env.TRADE_SLIPPAGE_BPS ? { tradeSlippageBps: process.env.TRADE_SLIPPAGE_BPS } : {}),
+        ...(process.env.MIRROR_NODE_BASE_URL ? { mirrorNodeBaseUrl: process.env.MIRROR_NODE_BASE_URL } : {}),
+        ...(process.env.SAUCERSWAP_ROUTER_ID ? { saucerRouterId: process.env.SAUCERSWAP_ROUTER_ID } : {}),
+        ...(process.env.SAUCERSWAP_QUOTER_ID ? { saucerQuoterId: process.env.SAUCERSWAP_QUOTER_ID } : {}),
+        ...(process.env.SAUCERSWAP_WHBAR_TOKEN_ID ? { saucerWhbarTokenId: process.env.SAUCERSWAP_WHBAR_TOKEN_ID } : {}),
+        ...(process.env.SAUCERSWAP_USDC_TOKEN_ID ? { saucerUsdcTokenId: process.env.SAUCERSWAP_USDC_TOKEN_ID } : {}),
+        ...(process.env.SAUCERSWAP_SAUCE_TOKEN_ID ? { saucerSauceTokenId: process.env.SAUCERSWAP_SAUCE_TOKEN_ID } : {}),
+        ...(process.env.SAUCERSWAP_FEE_TIER ? { saucerFeeTier: process.env.SAUCERSWAP_FEE_TIER } : {}),
     };
 };

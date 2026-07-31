@@ -1,9 +1,15 @@
 node_modules
 .env
+web/.env
+web/test-results/
 .playwright-cli/
+output/
 web/.astro/
 dist
 *.log
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
 .superpowers/
 .idea
 

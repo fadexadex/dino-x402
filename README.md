@@ -1,14 +1,32 @@
-# MarketRail — x402 market data on Hedera
+# Dino Agent — multi-asset intelligence on Hedera
 
-MarketRail is a working pay-per-query financial-data reference built on x402 v2 and Hedera
-testnet. An agent requests a product, receives HTTP 402 payment terms, signs within a strict
-spend policy, settles HBAR through the Blocky402 facilitator, and receives machine-readable
-data plus an on-chain transaction proof.
+Dino Agent is a working autonomous portfolio manager built on x402 v2, Hedera testnet, and
+SaucerSwap V2. Each cycle reads the configured Hedera account, purchases live intelligence
+for HBAR, USDC, and SAUCE through three independently settled x402 requests, values the
+managed portfolio, evaluates allocation bands, obtains an executable on-chain quote, and
+either opens an approval gate or submits the bounded trade when autonomous execution is
+explicitly enabled.
 
-The default `MarketDataProvider` buys live CoinGecko pricing for HBAR, BTC, ETH, SOL, and
-USDC, with an explicitly labeled deterministic fallback if the public feed is unavailable.
-The `DataProvider` interface is swappable without changing the payment flow. The resource
-server holds no Hedera key.
+The provided Dino Agent UI is retained as the visual foundation; its demo arrays, random
+activity, and browser-only state have been replaced with the versioned API and durable SSE
+event stream. Fallback market values remain visibly labelled and are prohibited from
+authorizing a trade.
+
+## Implemented workflow
+
+1. Mirror Node reads the real account balance and HTS token relationships.
+2. The agent purchases HBAR, USDC, and SAUCE data through the existing x402 payer.
+3. Settlement receipts and HashScan links are persisted in SQLite before being streamed.
+4. Allocation bands deterministically select at most one rebalance candidate.
+5. The order is capped by the 5% portfolio policy and 10 HBAR atomic limit.
+6. SaucerSwap QuoterV2 is called through Hedera's read-only contract endpoint.
+7. Live provenance, quote age, route, slippage, impact, balance, daily volume, and kill-switch
+   rules must all pass.
+8. Mode 3 persists a ten-minute approval proposal. Mode 4 signs only with the dedicated
+   agent account and verifies the resulting Hedera transaction before reporting success.
+
+No plain HBAR transfer is used as a substitute for a swap, and no mock quote is accepted by
+the trade policy.
 
 ## Paying with an agent
 
@@ -41,13 +59,33 @@ installed an agent can run the buy flow through the Hiero CLI instead of the loc
 
 ## Architecture
 
+```mermaid
+flowchart LR
+  UI["Dino Agent UI"] <-->|"REST + durable SSE"| API["Hono control API"]
+  API --> ORCH["Multi-asset runner"]
+  ORCH --> MIRROR["Hedera Mirror Node"]
+  ORCH --> X402["x402 buyer"]
+  X402 --> DATA["Protected market-data API"]
+  X402 --> FAC["Blocky402 facilitator"]
+  ORCH --> POLICY["Deterministic trade policy"]
+  POLICY --> QUOTER["SaucerSwap QuoterV2"]
+  QUOTER --> GATE{"Approval or autonomous mode"}
+  GATE --> ROUTER["SaucerSwap V2 Router"]
+  ROUTER --> VERIFY["SDK receipt + Mirror verification"]
+  API <--> DB["SQLite WAL: profiles, runs, proposals, spend, events, leases"]
+```
+
 - `src/core/provider.ts` — the `DataProvider` contract (the deliverable).
 - `src/providers/mock/` — deterministic `MockDataProvider`.
 - `src/providers/market/` — live CoinGecko-backed provider with a labeled resilient fallback.
-- `src/agent/` — agent decision, payment execution, and redacted trace.
+- `src/agent/` — single-asset x402 buyer plus multi-asset portfolio orchestration.
+- `src/portfolio/` — live Mirror Node holdings and deterministic allocation-band logic.
+- `src/trading/` — SaucerSwap route/quote/calldata, policy, execution, and verification.
+- `src/store/` — SQLite WAL projection, append-only event log, recovery, and leases.
+- `src/scheduler/` — persisted cadence, daily budget enforcement, and single-run lease.
 - `src/server/` — Hono app: pre-validation → `paymentMiddleware` → handler.
 - `scripts/e2e-pay.ts` — live `402 → sign → settle → 200` verification with HashScan and mirror-node proof.
-- `web/` — light financial UI and live agent workbench.
+- `web/` — the production-wired Dino Agent UI and Playwright browser suite.
 
 Swap data source: one line in `src/providers/index.ts`.
 Swap facilitator: change `FACILITATOR_URL`.
@@ -66,6 +104,19 @@ This is an npm workspace (root = API server, `web/` = Astro landing). Run everyt
    (0.05 HBAR) while rejecting larger challenges. Add `MISTRAL_API_KEY` only if using the
    optional model-backed agent decision; it stays server-side.
 
+The dedicated agent account is the custody boundary for both x402 purchases and optional
+autonomous swaps. Keep it funded only with test assets appropriate for the configured caps.
+The default UI starts in approval-gated mode; autonomous trading must be enabled explicitly
+through the schedule API.
+
+### SaucerSwap access
+
+No public or private SaucerSwap API key is needed for the implemented trade path. Quotes are
+read directly from testnet QuoterV2 and swaps are submitted directly to the Router contract.
+The public REST service is therefore not a production dependency. If a later feature needs
+SaucerSwap's hosted analytics or token metadata at sustained volume, request a supported key
+from their team and keep it server-side; do not embed a shared public key in the browser.
+
 Credentials pasted into chats, issues, logs, or screenshots must be rotated before use.
 
 ### API server
@@ -76,11 +127,30 @@ Credentials pasted into chats, issues, logs, or screenshots must be rotated befo
 - `npm run preflight` — verify the facilitator, Hedera accounts, live data feed, and Mistral model before recording.
 - `POST /api/agent/run` — run the agent flow and return a redacted protocol trace.
 - `GET /api/health` — provider and agent readiness without exposing credentials.
+- `GET /api/v1/profiles` — custody profiles and current autonomy/schedule state.
+- `POST /api/v1/profiles/:id/runs` — concurrency-safe multi-asset cycle.
+- `GET /api/v1/profiles/:id/stream` — durable SSE replay and live lifecycle events.
+- `GET /api/v1/profiles/:id/proposals` — fresh approval-gated SaucerSwap orders.
+- `POST /api/v1/proposals/:id/approve|reject` — evaluate a pending order exactly once.
+- `PATCH /api/v1/profiles/:id/schedule` — cadence, pause, and autonomy settings.
+- `POST /api/v1/system/halt|resume` — global kill switch.
 
 ### Web (live agent workbench + docs)
 - `npm run web:dev` — live workbench and landing page; also serves `llms.txt` for agents.
 - `npm run web:build && npm run web:preview` — preview the production build.
 - `npm run web:typecheck` — Astro type check.
+- `npm run test -w web` — frontend API/format unit tests.
+- `npm run test:e2e -w web` — automated Chromium desktop/mobile workflow tests.
+
+For a non-default API port, start Astro with `API_PROXY_TARGET=http://127.0.0.1:PORT`.
+
+## Persistence and safety
+
+Runtime state is stored in `data/agent.sqlite` with WAL journaling. Runs, proposals, spend,
+profiles, mandates, system halt state, and SSE events survive restart. A run interrupted by a
+process restart is marked failed rather than resubmitted. Scheduler leases prevent overlapping
+manual and scheduled runs on the single-host deployment. Secrets and SQLite runtime files are
+ignored by git.
 
 ## Catalog
 
@@ -134,18 +204,30 @@ the retry. The reference scripts expect an ECDSA account.
 
 | flow | product | amount | transaction |
 |---|---|---:|---|
+| Multi-asset cycle | HBAR intelligence | 0.01 HBAR | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785493884-281733761) |
+| Multi-asset cycle | USDC intelligence | 0.01 HBAR | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785493890-941770239) |
+| Multi-asset cycle | SAUCE intelligence | 0.01 HBAR | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785493898-759696230) |
+| Approval-gated SaucerSwap V2 trade | 10 HBAR → 13.410262 USDC | bounded by 1% slippage | [HashScan](https://hashscan.io/testnet/transaction/0.0.6255888-1785493939-647708643) |
 | Browser portfolio agent (Mistral plan + analysis) | `quote?symbol=HBAR` | 0.02 HBAR | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785458285-103875125) |
 | CLI protocol acceptance test | `spot-price?symbol=HBAR` | 0.01 HBAR | [HashScan](https://hashscan.io/testnet/transaction/0.0.7162784-1785457946-390016878) |
 
-Both transactions were independently checked through Hedera's testnet mirror API for
-`SUCCESS`, with payer `0.0.6255888` debited and receiver `0.0.9848501` credited by the exact
-catalog price. Run `npm run e2e` to generate and verify a fresh proof before recording.
+The x402 transfers were checked through Hedera's testnet mirror API for `SUCCESS`, with payer
+`0.0.6255888` debited and receiver `0.0.9848501` credited by the exact catalog price. The swap
+proof additionally verifies that account `0.0.6255888` received at least the Router order's
+minimum USDC output across the transaction's child records. Run `npm run e2e` to generate and
+verify a fresh x402 proof before recording.
 
 ## Known limitations
 
 - The public CoinGecko feed is not investment-grade and can rate-limit; fallback values are
-  deterministic and returned with `isLive: false` so an agent cannot mistake them for live data.
+  deterministic and returned with `isLive: false`. A cycle may display them, but policy blocks
+  every associated trade.
 - `freshnessWindowSec` is in the contract but not enforced (clean pay-per-call).
 - The hosted testnet facilitator is an external availability and rate-limit dependency.
 - Local `.env` key custody is suitable for a testnet demo, not production funds.
+- User-wallet profiles fail closed at the signing boundary until a WalletConnect/Reown project
+  ID and client-side transaction-signing flow are supplied. The dedicated agent profile is the
+  fully working end-to-end path in this repository.
+- This implementation is intentionally single-host. Horizontal deployment needs a shared job
+  queue/lease backend and managed SQL rather than the local SQLite scheduler lease.
 - No HCS attestation is included in this version; settlement proof is the Hedera transaction.
