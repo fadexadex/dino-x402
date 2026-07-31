@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { DinoMark } from "@/components/agent/DinoMark";
 import { EventCard } from "@/components/agent/EventCard";
+import { UserMessage } from "@/components/agent/UserMessage";
 import { ProposalGate } from "@/components/agent/ProposalGate";
 import { AutonomyDial } from "@/components/agent/AutonomyDial";
 import { WatchStatus } from "@/components/agent/WatchStatus";
@@ -9,12 +10,18 @@ import { RunsRail } from "@/components/agent/RunsRail";
 import { Composer } from "@/components/agent/Composer";
 import { Inspector, type InspectorView } from "@/components/agent/Inspector";
 import { ThinkingTrace } from "@/components/kit/ThinkingTrace";
+import { ThinkingReasoning } from "@/components/kit/ThinkingReasoning";
 import type { AgentEvent, AutonomyMode, Limits } from "@/lib/agent-types";
 import { useVariant, useVariants } from "@/lib/variants";
 import { api } from "@/lib/agent-api";
-import { isUserFacingKind, toEvent, toHoldings, toProposal } from "@/lib/agent-view";
+import { isStreamMetaKind, isUserFacingKind, toEvent, toHoldings, toProposal } from "@/lib/agent-view";
 import { signAndExecuteSwap } from "@/lib/wallet-sign";
 import { useAgentDashboard } from "./useAgentDashboard";
+
+type ChatItem =
+  | { type: "user"; id: string; at: number; text: string }
+  | { type: "thoughts"; id: string; at: number; sentences: string[]; working: boolean; startedAt: number }
+  | { type: "event"; id: string; at: number; event: AgentEvent };
 
 /** Locked-in scroll style for the workspace rail. */
 const WORKSPACE_SCROLL = "scroll-snap-cards scroll-fade";
@@ -30,7 +37,8 @@ export function DinoWorkspace() {
   const [focusId, setFocusId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const [pendingObjective, setPendingObjective] = useState<string | null>(null);
+  const [localUserMessages, setLocalUserMessages] = useState<Array<{ id: string; at: number; text: string }>>([]);
+  const [thoughtStartedAt, setThoughtStartedAt] = useState<number | null>(null);
   const proposalVariant = useVariant("proposal");
   const rightNowPlacement = useVariant("rightNow");
   const graphPlacement = useVariant("graphPlacement");
@@ -50,34 +58,37 @@ export function DinoWorkspace() {
   });
   const rawEvents = latestRunId
     ? visibleEvents.filter((event) => event.runId === latestRunId)
-    : visibleEvents.slice(-20);
+    : visibleEvents.slice(-40);
   const receipts = data?.receipts ?? [];
   const baseEvents = useMemo(() => rawEvents.map((event) => toEvent(event, receipts)), [rawEvents, receipts]);
-  const events = useMemo(() => {
-    const mapped = [...baseEvents];
-    if (pendingObjective && sending) {
-      mapped.unshift({
-        id: "optimistic-run",
-        step: "trigger",
-        at: Date.now(),
-        title: "Starting check-in",
-        detail: pendingObjective,
-        tone: "signal",
-      });
-    }
-    return mapped;
-  }, [baseEvents, pendingObjective, sending]);
+  const thoughtSentences = useMemo(
+    () =>
+      rawEvents
+        .filter((event) => event.kind === "agent.thinking")
+        .map((event) => event.detail || event.title || "")
+        .filter(Boolean) as string[],
+    [rawEvents],
+  );
+  const serverUserTexts = useMemo(
+    () =>
+      new Set(
+        rawEvents
+          .filter((event) => event.kind === "user.message")
+          .map((event) => (event.detail || event.title || "").trim().toLowerCase()),
+      ),
+    [rawEvents],
+  );
   const halted = Boolean(data?.system?.halted || profile?.status === "halted");
   const connected = Boolean(profile?.accountId);
   const awaiting = Boolean(proposal);
-  const working = sending || loading || data?.runs?.[0]?.status === "running";
+  const working = sending || data?.runs?.[0]?.status === "running";
   const run = {
-    events,
+    events: baseEvents.filter((event) => !isStreamMetaKind(event.kind ?? "")),
     ticks: data?.graph?.ticks?.map((tick) => ({ ...tick, provenance: tick.provenance === "stale" ? "fallback" as const : tick.provenance })) ?? [],
-    markers: data?.graph?.markers ?? events.filter((event) => event.purchase || event.proposal || event.settlement).map((event) => ({ t: event.at, eventId: event.id })),
+    markers: data?.graph?.markers ?? baseEvents.filter((event) => event.purchase || event.proposal || event.settlement).map((event) => ({ t: event.at, eventId: event.id })),
     halted,
     connected,
-    phase: awaiting ? "awaiting" : working ? "running" : "idle",
+    phase: awaiting ? "awaiting" as const : working ? "running" as const : "idle" as const,
     connect: refresh,
     disconnect: refresh,
     approve: async () => {
@@ -97,22 +108,73 @@ export function DinoWorkspace() {
     resume: async () => { await api.resume(); await refresh(); },
   };
 
+  const chatItems = useMemo(() => {
+    const items: ChatItem[] = [];
+    for (const message of localUserMessages) {
+      if (!serverUserTexts.has(message.text.trim().toLowerCase())) {
+        items.push({ type: "user", id: message.id, at: message.at, text: message.text });
+      }
+    }
+    for (const event of rawEvents) {
+      if (event.kind === "user.message") {
+        items.push({
+          type: "user",
+          id: event.id,
+          at: event.occurredAt ? new Date(event.occurredAt).getTime() : Date.now(),
+          text: event.detail || event.title || "",
+        });
+        continue;
+      }
+      if (event.kind === "agent.thinking") continue;
+      items.push({
+        type: "event",
+        id: event.id,
+        at: event.occurredAt ? new Date(event.occurredAt).getTime() : Date.now(),
+        event: toEvent(event, receipts),
+      });
+    }
+    if (thoughtSentences.length > 0 || working) {
+      const firstThought = rawEvents.find((event) => event.kind === "agent.thinking");
+      items.push({
+        type: "thoughts",
+        id: `thoughts-${latestRunId ?? "live"}`,
+        at: firstThought?.occurredAt ? new Date(firstThought.occurredAt).getTime() : thoughtStartedAt ?? Date.now(),
+        sentences: thoughtSentences,
+        working,
+        startedAt: thoughtStartedAt ?? (firstThought?.occurredAt ? new Date(firstThought.occurredAt).getTime() : Date.now()),
+      });
+    }
+    return items.sort((a, b) => {
+      // Keep the live thought block near the newest activity while working.
+      if (a.type === "thoughts" && working) return 1;
+      if (b.type === "thoughts" && working) return -1;
+      return a.at - b.at;
+    });
+  }, [localUserMessages, serverUserTexts, rawEvents, receipts, thoughtSentences, working, latestRunId, thoughtStartedAt]);
+
+  useEffect(() => {
+    if (working && thoughtStartedAt === null) setThoughtStartedAt(Date.now());
+    if (!working && !sending) setThoughtStartedAt(null);
+  }, [working, sending, thoughtStartedAt]);
+
   const onSend = async (objective: string) => {
     if (!profile || sending) return;
+    const text = objective.trim();
+    if (!text) return;
     setSending(true);
     setSendError(null);
-    setPendingObjective(objective);
+    setThoughtStartedAt(Date.now());
+    setLocalUserMessages((current) => [...current, { id: `local-${Date.now()}`, at: Date.now(), text }]);
     const poll = window.setInterval(() => { void refresh(); }, 1_200);
     try {
-      await api.updateMandate(profile.id, { objective });
-      await api.run(profile.id, objective);
+      await api.updateMandate(profile.id, { objective: text });
+      await api.run(profile.id, text);
       await refresh();
     } catch (err) {
       setSendError(err instanceof Error ? err.message : "Could not start the agent run.");
     } finally {
       window.clearInterval(poll);
       setSending(false);
-      setPendingObjective(null);
     }
   };
 
@@ -144,7 +206,7 @@ export function DinoWorkspace() {
     const el = streamRef.current;
     if (!el || !stickToBottom.current) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [run.events.length, run.phase]);
+  }, [chatItems.length, thoughtSentences.length, run.phase]);
 
   const onStreamScroll = () => {
     const el = streamRef.current;
@@ -159,22 +221,30 @@ export function DinoWorkspace() {
 
   const inspect = (event: AgentEvent) => openInspector("trace", event.id);
 
-  const liveRows = useMemo(
-    () =>
-      run.events.slice(-4).map((e) => ({
-        primary: e.title,
-        secondary: e.step,
-        tone: e.tone ?? "ink",
-      })),
-    [run.events],
-  );
+  const liveRows = useMemo(() => {
+    if (thoughtSentences.length > 0) {
+      return thoughtSentences.slice(-5).map((sentence, index) => ({
+        primary: sentence,
+        secondary: working && index === Math.min(4, thoughtSentences.length - 1) ? "now" : "thought",
+        tone: (working && index === Math.min(4, thoughtSentences.length - 1) ? "signal" : "ink") as AgentEvent["tone"],
+      }));
+    }
+    return run.events.slice(-4).map((e) => ({
+      primary: e.title,
+      secondary: e.step,
+      tone: e.tone ?? "ink",
+    }));
+  }, [thoughtSentences, run.events, working]);
 
-  const rightNow = (
+  const rightNow = thoughtSentences.length > 0 || working ? (
+    <ThinkingReasoning
+      sentences={thoughtSentences}
+      working={working}
+      startedAt={thoughtStartedAt ?? undefined}
+    />
+  ) : (
     <ThinkingTrace
-      activeLabel={
-        run.phase === "connecting"
-          ? "Connecting your wallet" : "Working the check-in"
-      }
+      activeLabel="Working the check-in"
       doneLabel={
         awaiting
           ? "Paused for your approval"
@@ -215,6 +285,7 @@ export function DinoWorkspace() {
         onView={setInspector}
         onFocus={setFocusId}
         onClose={() => setInspector(null)}
+        weights={data?.graph?.weights ?? []}
         spend={{
           dataAllTime: Number(data?.spend?.dataHbar ?? 0),
           dataToday: Number(data?.spend?.dataTodayHbar ?? 0),
@@ -358,7 +429,7 @@ export function DinoWorkspace() {
                         Connect an account to begin
                       </p>
                       <p className="mx-auto mt-1.5 max-w-md text-[12.5px] leading-relaxed text-ink-2">
-                        The workspace will populate only after the server has an authenticated portfolio profile.
+                        Connect a wallet for approval-gated modes, or enable the autonomous agent treasury without WalletConnect.
                       </p>
                       <div className="mt-3 flex items-center justify-center gap-2">
                         <button
@@ -372,21 +443,40 @@ export function DinoWorkspace() {
                           href="/connect"
                           className="rounded-control border border-line px-3 py-1.5 text-[12.5px] text-ink-2 hover:bg-hover"
                         >
-                          Pick a wallet
+                          Onboard
                         </a>
                       </div>
                     </section>
                   )}
 
                   <section className={`flex flex-col ${density === "compact" ? "gap-3" : "gap-4"}`}>
-                    {run.events.map((event) => (
-                      <EventCard
-                        key={event.id}
-                        event={event}
-                        onInspect={inspect}
-                        onGraph={(e) => openInspector("graph", e.id)}
-                      />
-                    ))}
+                    {chatItems.map((item) => {
+                      if (item.type === "user") {
+                        return <UserMessage key={item.id} text={item.text} at={item.at} />;
+                      }
+                      if (item.type === "thoughts") {
+                        // Sticky under header / right-now card already shows the live stream;
+                        // keep an inline copy in the main rail while the agent is working.
+                        if (rightNowPlacement === "Sticky under header" && !item.working) return null;
+                        return (
+                          <div key={item.id} className="rounded-lg border border-line bg-card/80 px-3.5 py-3">
+                            <ThinkingReasoning
+                              sentences={item.sentences}
+                              working={item.working}
+                              startedAt={item.startedAt}
+                            />
+                          </div>
+                        );
+                      }
+                      return (
+                        <EventCard
+                          key={item.id}
+                          event={item.event}
+                          onInspect={inspect}
+                          onGraph={(e) => openInspector("graph", e.id)}
+                        />
+                      );
+                    })}
                   </section>
                 </div>
               </div>

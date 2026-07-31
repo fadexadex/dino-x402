@@ -95,7 +95,11 @@ export type DashboardSnapshot = {
   proposals?: Proposal[];
   spend?: DashboardSpend;
   system?: { halted?: boolean };
-  graph?: { ticks?: Array<{ t: number; price: number; provenance: Provenance }>; markers?: Array<{ t: number; eventId: string }> };
+  graph?: {
+    ticks?: Array<{ t: number; price: number; provenance: Provenance }>;
+    markers?: Array<{ t: number; eventId: string }>;
+    weights?: Array<{ t: number; weight: number }>;
+  };
   mandate?: PortfolioMandate | null;
   schedule?: { cadenceMinutes?: number; paused?: boolean; nextRunAt?: string; lastRunAt?: string; autonomyMode?: 1 | 2 | 3 | 4 };
   runs?: DashboardRun[];

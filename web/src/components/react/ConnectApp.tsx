@@ -47,6 +47,11 @@ export function ConnectApp() {
       if (state.connectedAccountId) {
         setAccountId(state.connectedAccountId);
         setStep(state.autonomyMode && state.autonomyMode > 1 ? "done" : "autonomy");
+      } else if (state.agentTreasury?.accountId && state.autonomyMode === 4 && state.agentTreasury.funded) {
+        setAgentAccountId(state.agentTreasury.accountId);
+        setAgentFunded(state.agentTreasury.funded);
+        setAgentHbar(state.agentTreasury.hbarFormatted);
+        setStep("done");
       }
       if (state.agentTreasury) {
         setAgentAccountId(state.agentTreasury.accountId);
@@ -55,6 +60,24 @@ export function ConnectApp() {
       }
     }).catch(() => undefined);
   }, []);
+
+  const onAutonomousWithoutWallet = async () => {
+    setBusy(true);
+    setError(null);
+    setChoice(4);
+    try {
+      const treasury = await refreshTreasury();
+      if (!treasury?.accountId) {
+        setError("Autonomous mode needs a configured agent treasury account on the server.");
+        return;
+      }
+      setStep("fund");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load agent treasury.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const refreshTreasury = async () => {
     const state = await api.getOnboarding();
@@ -148,7 +171,7 @@ export function ConnectApp() {
               Connect an account to begin
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-ink-2">
-              First connect your Hedera testnet wallet. Next you will choose how much control the agent gets — from watch-only to a funded autonomous treasury.
+              Connect a Hedera testnet wallet for approval-gated modes, or skip straight to the autonomous agent treasury.
             </p>
             <div className="mt-6 grid gap-2">
               {WALLETS.map((wallet) => (
@@ -163,6 +186,17 @@ export function ConnectApp() {
                   <span className="font-mono text-[11px] text-ink-3">{busy ? "…" : "testnet"}</span>
                 </button>
               ))}
+              <button
+                type="button"
+                disabled={busy || !agentAccountId}
+                onClick={() => void onAutonomousWithoutWallet()}
+                className="rounded-lg border border-line bg-card px-3.5 py-3 text-left transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <span className="text-[13px] font-medium text-ink">Use autonomous agent treasury</span>
+                <span className="mt-1 block text-[12px] leading-relaxed text-ink-2">
+                  No WalletConnect. Mode 4 runs against the funded server-managed treasury{agentAccountId ? ` (${agentAccountId})` : ""}.
+                </span>
+              </button>
             </div>
           </>
         )}
@@ -173,7 +207,9 @@ export function ConnectApp() {
               How should the agent work?
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-ink-2">
-              Connected as <span className="font-mono text-ink">{accountId}</span>. Money stays in your control unless you explicitly fund an agent treasury for full autonomy.
+              {accountId
+                ? <>Connected as <span className="font-mono text-ink">{accountId}</span>. Money stays in your control unless you explicitly fund an agent treasury for full autonomy.</>
+                : "No user wallet connected. You can still enable Mode 4 on the funded agent treasury."}
             </p>
             <div className="mt-6 grid gap-2">
               {CHOICES.map((item) => (

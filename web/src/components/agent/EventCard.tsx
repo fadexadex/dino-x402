@@ -41,27 +41,53 @@ function Settlement({ event }: { event: AgentEvent }) {
   const loaderVariant = useVariant("loader");
   const s = event.settlement;
   if (!s) return null;
+  const confirmed = s.status === "confirmed" || Boolean(s.confirmedAt);
   return (
-    <div className="mt-2 w-full max-w-lg rounded-control border border-line bg-card px-3 py-2.5">
+    <div
+      className="mt-2 w-full max-w-lg rounded-control border border-line bg-card px-3 py-2.5"
+      style={{ animation: confirmed ? "fade-in 350ms ease-out both" : undefined }}
+    >
       <div className="flex items-center justify-between gap-3">
-        <LoadingState
-          label="Awaiting consensus"
-          variant={loaderVariant}
-          startedAt={s.submittedAt}
-          tone="signal"
-        />
-        <span className="rounded-full border border-orange/30 bg-orange-soft px-2 py-0.5 text-[10.5px] font-medium tracking-[0.06em] text-orange uppercase">
-          Not yet final
+        {confirmed ? (
+          <span className="flex items-center gap-2 text-[13px] font-medium text-green">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M20 6L9 17l-5-5" />
+            </svg>
+            Verified on Hedera
+            {s.confirmedAt && s.submittedAt ? (
+              <span className="font-mono text-[11px] font-normal text-ink-3 tabular-nums">
+                {((s.confirmedAt - s.submittedAt) / 1000).toFixed(1)}s
+              </span>
+            ) : null}
+          </span>
+        ) : (
+          <LoadingState
+            label="Awaiting consensus"
+            variant={loaderVariant}
+            startedAt={s.submittedAt}
+            tone="signal"
+          />
+        )}
+        <span
+          className={`rounded-full border px-2 py-0.5 text-[10.5px] font-medium tracking-[0.06em] uppercase ${
+            confirmed
+              ? "border-green/30 bg-green-soft text-green"
+              : "border-orange/30 bg-orange-soft text-orange"
+          }`}
+        >
+          {confirmed ? "Final" : "Not yet final"}
         </span>
       </div>
-      <a
-        href={hashscan(s.txHash)}
-        target="_blank"
-        rel="noreferrer"
-        className="animated-underline mt-2 inline-block font-mono text-[11px] text-ink-3"
-      >
-        {shortHash(s.txHash)} ↗
-      </a>
+      {s.txHash && s.txHash !== "pending" && (
+        <a
+          href={hashscan(s.txHash)}
+          target="_blank"
+          rel="noreferrer"
+          className="animated-underline mt-2 inline-block font-mono text-[11px] text-ink-3"
+        >
+          {shortHash(s.txHash)} ↗
+        </a>
+      )}
     </div>
   );
 }

@@ -17,6 +17,7 @@ export function Inspector({
   onFocus,
   onClose,
   spend,
+  weights = [],
 }: {
   view: InspectorView;
   ticks: Tick[];
@@ -28,6 +29,7 @@ export function Inspector({
   onFocus?: (id: string) => void;
   onClose: () => void;
   spend?: Spend;
+  weights?: Array<{ t: number; weight: number }>;
 }) {
   const focused = events.find((e) => e.id === focusId) ?? null;
   const tabs: { id: InspectorView; label: string }[] = [
@@ -88,6 +90,7 @@ export function Inspector({
                 focusT={focused?.at ?? null}
                 tall={tall}
                 onMarker={(id) => onFocus?.(id)}
+                weights={weights}
               />
             </div>
 

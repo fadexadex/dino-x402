@@ -96,16 +96,30 @@ function usePaths(ticks: Tick[], height: number, domainP: [number, number]) {
   }, [ticks, height, domainP]);
 }
 
-function CompositionSteps({ markers, x }: { markers: Marker[]; x: (t: number) => number }) {
-  let weight = 68.4;
-  const pts: { px: number; w: number }[] = [{ px: 0, w: weight }];
-  markers.forEach((m) => {
-    pts.push({ px: x(m.t), w: weight });
-    weight -= 7;
-    pts.push({ px: x(m.t), w: weight });
-  });
-  pts.push({ px: W, w: weight });
-  const yy = (w: number) => H - ((w - 45) / 35) * (H - 30) - 15;
+function CompositionSteps({
+  x,
+  weights,
+}: {
+  markers: Marker[];
+  x: (t: number) => number;
+  weights?: Array<{ t: number; weight: number }>;
+}) {
+  // Prefer real HBAR allocation samples from completed runs; never invent a declining demo.
+  const samples = weights && weights.length > 0 ? [...weights].sort((a, b) => a.t - b.t) : null;
+  if (!samples || samples.length === 0) {
+    return null;
+  }
+  const lo = Math.min(...samples.map((s) => s.weight));
+  const hi = Math.max(...samples.map((s) => s.weight));
+  const pad = Math.max(2, (hi - lo) * 0.2);
+  const minW = lo - pad;
+  const maxW = hi + pad;
+  const yy = (w: number) => H - ((w - minW) / Math.max(1e-9, maxW - minW)) * (H - 30) - 15;
+  const pts = samples.map((s) => ({ px: x(s.t), w: s.weight }));
+  if (pts.length === 1) {
+    pts.unshift({ px: 0, w: pts[0]!.w });
+    pts.push({ px: W, w: pts[0]!.w });
+  }
   const d = pts.map((p, i) => `${i ? "L" : "M"}${p.px.toFixed(1)} ${yy(p.w).toFixed(1)}`).join("");
   return <path d={d} fill="none" stroke="var(--ink)" strokeWidth="1.6" strokeLinejoin="miter" />;
 }
@@ -125,6 +139,7 @@ function Frame({
   label,
   unit = "",
   digits = 5,
+  weights,
 }: {
   ticks: Tick[];
   markers: Marker[];
@@ -140,9 +155,10 @@ function Frame({
   label?: string;
   unit?: string;
   digits?: number;
+  weights?: Array<{ t: number; weight: number }>;
 }) {
   const domainP = useStickyPriceDomain(ticks);
-  const p = usePaths(ticks, height, domainP);
+  const p = usePaths(ticks.length === 1 ? [ticks[0]!, { ...ticks[0]!, t: ticks[0]!.t + 1 }] : ticks, height, domainP);
   const gid = useId();
   const [hover, setHover] = useState<Tick | null>(null);
   const [brush, setBrush] = useState<{ a: number; b: number } | null>(null);
@@ -300,7 +316,7 @@ function Frame({
               ))}
             </>
           )}
-          {showComposition && <CompositionSteps markers={markers} x={p.x} />}
+          {showComposition && <CompositionSteps markers={markers} x={p.x} weights={weights} />}
 
           {focusT != null && focusT >= p.minT && focusT <= p.maxT && (
             <g pointerEvents="none">
@@ -539,6 +555,7 @@ export function LiveGraph({
   onMarker,
   focusT = null,
   tall = false,
+  weights = [],
 }: {
   ticks: Tick[];
   markers: Marker[];
@@ -546,6 +563,7 @@ export function LiveGraph({
   onMarker?: ((id: string) => void) | undefined;
   focusT?: number | null;
   tall?: boolean;
+  weights?: Array<{ t: number; weight: number }>;
 }) {
   const variant = useVariant("graph");
   const [selected, setSelected] = useState<Tick | null>(null);
@@ -626,18 +644,18 @@ export function LiveGraph({
     </div>
   );
 
-  if (ticks.length < 2) {
+  if (ticks.length === 0) {
     return (
       <div className="flex h-full min-h-[440px] flex-col rounded-xl border border-line bg-card">
         <div className="px-5 pt-4">
           <p className="text-[10.5px] tracking-[0.09em] text-ink-3 uppercase">HBAR / USDC · paid feed</p>
-          <p className="mt-3 text-[13px] font-medium text-ink">Waiting for a second persisted observation</p>
+          <p className="mt-3 text-[13px] font-medium text-ink">Waiting for paid intelligence</p>
           <p className="mt-1 max-w-md text-[12px] leading-relaxed text-ink-3">
-            The graph draws only paid intelligence retained by completed runs. It will not invent or interpolate market ticks.
+            The graph draws only paid intelligence retained by agent runs. It will not invent or interpolate market ticks.
           </p>
         </div>
         <div className="m-5 flex min-h-0 flex-1 items-center justify-center rounded-lg border border-dashed border-line-strong bg-inset/30 font-mono text-[11px] text-ink-3">
-          {ticks.length === 1 ? "1 verified tick" : "No verified ticks yet"}
+          No verified ticks yet
         </div>
         <div className="shrink-0 border-t border-line px-5 py-3"><Legend /></div>
       </div>
@@ -741,6 +759,7 @@ export function LiveGraph({
           onZoom={zoom}
           showComposition={showWeight}
           height={fillH}
+          weights={weights}
         />
       </div>
 

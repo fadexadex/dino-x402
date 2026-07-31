@@ -3,9 +3,13 @@ import { type DashboardSnapshot, type RunEvent, loadDashboard } from "../../lib/
 
 type State = { data: DashboardSnapshot | null; loading: boolean; error: string | null };
 
+const REFRESH_KINDS =
+  /^(payment\.settled|trade\.(verified|submitted|proposed)|run\.(completed|failed)|analysis\.completed|portfolio\.read)$/;
+
 export function useAgentDashboard() {
   const [state, setState] = useState<State>({ data: null, loading: true, error: null });
   const sequence = useRef(0);
+  const refreshTimer = useRef<number | null>(null);
   const refresh = useCallback(async () => {
     setState((current) => ({ ...current, loading: current.data === null, error: null }));
     try {
@@ -15,6 +19,11 @@ export function useAgentDashboard() {
     }
     catch (error) { setState((current) => ({ ...current, loading: false, error: error instanceof Error ? error.message : "Could not load agent state." })); }
   }, []);
+
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
+    refreshTimer.current = window.setTimeout(() => { void refresh(); }, 400);
+  }, [refresh]);
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
@@ -31,11 +40,16 @@ export function useAgentDashboard() {
           if (!current.data || (current.data.events ?? []).some((existing) => existing.id === event.id)) return current;
           return { ...current, data: { ...current.data, events: [...(current.data.events ?? []), event] } };
         });
+        if (REFRESH_KINDS.test(event.kind)) scheduleRefresh();
       } catch { /* A malformed stream event is ignored; server state remains authoritative. */ }
     };
     stream.addEventListener("snapshot", () => { void refresh(); });
+    stream.addEventListener("agent.completed", () => { scheduleRefresh(); });
     stream.onerror = () => setState((current) => ({ ...current, error: current.error ?? "Live updates disconnected. Reconnecting…" }));
-    return () => stream.close();
-  }, [state.data?.profile?.id, refresh]);
+    return () => {
+      stream.close();
+      if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
+    };
+  }, [state.data?.profile?.id, refresh, scheduleRefresh]);
   return { ...state, refresh };
 }

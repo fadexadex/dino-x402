@@ -349,17 +349,32 @@ export const createApp = (
     if (!profile) return c.json({ error: "Profile not found" }, 404);
     const series = (c.req.query("series") ?? "portfolio").toUpperCase();
     const runs = store.getState().runs.filter((run) => run.accountId === profile.accountId).slice().reverse();
+    const weights = runs.flatMap((run) => {
+      const portfolio = run.portfolioBefore;
+      const hbar = portfolio?.allocations?.find((allocation) => allocation.symbol.toUpperCase() === "HBAR");
+      if (typeof hbar?.allocationPct !== "number") return [];
+      return [{ t: Date.parse(run.completedAt ?? run.startedAt), weight: hbar.allocationPct }];
+    });
     const ticks = runs.flatMap((run) => {
       const portfolio = run.portfolioBefore;
       if (series === "PORTFOLIO") return typeof portfolio?.totalUsdValue === "number" ? [{ t: Date.parse(portfolio.fetchedAt), price: portfolio.totalUsdValue, value: portfolio.totalUsdValue, provenance: portfolio.provenance }] : [];
-      const price = run.dataPurchases.filter((purchase) => purchase.symbol.toUpperCase() === series).map((purchase) => priceFromPurchase(purchase.data)).find((value): value is number => value !== undefined);
-      const at = run.dataPurchases.find((purchase) => purchase.symbol.toUpperCase() === series) ? run.completedAt ?? run.startedAt : undefined;
-      return price !== undefined && at ? [{ t: Date.parse(at), price, value: price, provenance: "live" as const }] : [];
+      // Include in-progress purchases so the chart updates as each x402 settle lands.
+      return run.dataPurchases
+        .filter((purchase) => purchase.symbol.toUpperCase() === series)
+        .map((purchase) => {
+          const price = priceFromPurchase(purchase.data);
+          if (price === undefined) return null;
+          const at = Date.parse(run.completedAt ?? run.startedAt);
+          return { t: at, price, value: price, provenance: "live" as const };
+        })
+        .filter((tick): tick is { t: number; price: number; value: number; provenance: "live" } => tick !== null);
     });
+    // Deduplicate same-timestamp ticks so repeated cache hits don't stack.
+    const deduped = [...new Map(ticks.map((tick) => [`${tick.t}:${tick.price}`, tick])).values()].sort((a, b) => a.t - b.t);
     const markers = store.replayEvents(undefined, profile.id).map(eventForUi)
-      .filter((event) => ["payment.settled", "trade.proposed", "trade.verified"].includes(event.kind))
+      .filter((event) => ["payment.settled", "trade.proposed", "trade.submitted", "trade.verified"].includes(event.kind))
       .map((event) => ({ t: Date.parse(event.occurredAt ?? ""), eventId: event.id, kind: event.kind, label: event.title, provenance: event.provenance }));
-    return c.json(jsonSafe({ series: series === "PORTFOLIO" ? "portfolio" : series, ticks, markers }));
+    return c.json(jsonSafe({ series: series === "PORTFOLIO" ? "portfolio" : series, ticks: deduped, markers, weights }));
   });
 
   app.get("/api/v1/profiles/:profileId/receipts", (c) => {
