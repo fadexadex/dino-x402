@@ -54,7 +54,7 @@ function saucerConfig(config: ServerConfig): SaucerSwapConfig {
 export class MultiAssetAgentRunner {
   private readonly tradePolicy: TradePolicy;
   private readonly intelligence: AgentRunner;
-  private readonly signalCache = new Map<string, { price: number; at: number; provenance: "live" | "fallback" }>();
+  private readonly signalCache = new Map<string, { price: number; at: number; provenance: "live" | "fallback"; data?: unknown; productId?: string; transactionId?: string; hashscanUrl?: string }>();
 
   constructor(private readonly config: ServerConfig, _provider?: DataProvider) {
     this.intelligence = new AgentRunner(config);
@@ -84,6 +84,17 @@ export class MultiAssetAgentRunner {
     };
     const think = (detail: string, title = "Thinking") => {
       event("agent.thinking", title, detail, { presentInUi: true });
+    };
+    const conclude = (record: AgentMultiRunRecord, headline: string, bullets: string[]) => {
+      think(headline);
+      event("run.completed", "Conclusion", headline, {
+        presentInUi: true,
+        bullets,
+        recommendation: record.recommendation,
+        status: record.status,
+        spentDataHbar: record.spentDataHbar,
+        purchases: record.dataPurchases.map((purchase) => purchase.symbol),
+      });
     };
     const objective = input.objective?.trim().slice(0, 600) || "Autonomous multi-asset portfolio monitoring and rebalancing";
     const userProvidedObjective = Boolean(input.objective?.trim());
@@ -125,6 +136,10 @@ export class MultiAssetAgentRunner {
         record.status = "completed"; record.completedAt = new Date().toISOString();
         think("Mode 1 is observe-only, so I stop after recording the portfolio — no paid reads and no trade proposal.");
         event("analysis.completed", "Observe-only check-in complete", record.recommendation.summary);
+        conclude(record, "Conclusion: observed the live portfolio only — no paid CoinGecko reads and no trade.", [
+          `Account ${accountId} was read from Mirror Node.`,
+          "Autonomy mode 1 forbids intelligence purchases and execution.",
+        ]);
         store.updateRun(runId, record, profileId);
         sseBroadcaster.broadcast("agent.completed", { runId, record }, { profileId, runId });
         return record;
@@ -140,16 +155,27 @@ export class MultiAssetAgentRunner {
         const cached = this.signalCache.get(symbol);
         if (cached && Date.now() - cached.at < 60_000) {
           prices[symbol] = cached.price;
-          think(`${symbol} still has a paid signal inside its freshness window — reusing it instead of spending again.`);
-          event("data.received", `${symbol} intelligence reused`, "A paid signal inside its freshness window was reused.", { provenance: "cached" });
+          think(`${symbol} still has a paid CoinGecko signal inside its freshness window — reusing $${cached.price} instead of spending again.`);
+          event("data.received", `${symbol} intelligence reused`, `Reused paid CoinGecko signal at $${cached.price}.`, { provenance: "cached", price: cached.price, symbol });
+          // Keep a chartable observation so cache-hit runs still move the graph.
+          if (cached.data) {
+            record.dataPurchases.push({
+              symbol,
+              productId: cached.productId ?? "spot-price",
+              amountHbar: 0,
+              transactionId: `cache:${runId}:${symbol}`,
+              hashscanUrl: cached.hashscanUrl ?? "",
+              data: cached.data,
+            });
+          }
           continue;
         }
         const remainingCycle = cycleBudget - spend;
         const remainingDaily = dailyBudget - alreadySpentToday - spend;
         const remaining = remainingCycle < remainingDaily ? remainingCycle : remainingDaily;
         if (remaining <= 0n) throw new Error("x402 data budget exhausted before all required asset signals were acquired");
-        think(`Buying a live ${symbol} signal through x402 so the valuation stays on-chain and independently verifiable.`);
-        event("payment.required", `Buying ${symbol} intelligence`, "Requesting a real x402 quote.");
+        think(`Buying a live ${symbol} CoinGecko signal through x402 so the valuation stays on-chain and independently verifiable.`);
+        event("payment.required", `Buying ${symbol} intelligence`, "Requesting a real x402 quote for CoinGecko market data.");
         const result = await this.intelligence.run({ symbol, objective: record.objective, portfolio: [], budgetAtomic: remaining.toString() });
         if (result.status !== "completed" || !result.purchase) throw new Error(`Unable to obtain verified paid intelligence for ${symbol}: ${result.error ?? "unknown error"}`);
         if (result.plan?.reason) {
@@ -163,12 +189,20 @@ export class MultiAssetAgentRunner {
         const signal = paidSignal(result.purchase.data);
         if (!signal?.price) throw new Error(`Paid intelligence for ${symbol} lacked a usable price`);
         prices[symbol] = signal.price; spend += BigInt(result.purchase.amountAtomic);
-        this.signalCache.set(symbol, { price: signal.price, at: Date.now(), provenance: signal.provenance });
+        this.signalCache.set(symbol, {
+          price: signal.price,
+          at: Date.now(),
+          provenance: signal.provenance,
+          data: result.purchase.data,
+          productId: result.purchase.productId,
+          transactionId: result.purchase.transactionId,
+          hashscanUrl: result.purchase.hashscanUrl,
+        });
         const amountHbar = Number(BigInt(result.purchase.amountAtomic)) / 1e8;
         record.dataPurchases.push({ symbol, productId: result.purchase.productId, amountHbar, transactionId: result.purchase.transactionId, hashscanUrl: result.purchase.hashscanUrl, data: result.purchase.data });
         store.recordSpend(amountHbar, 0, profileId);
-        event("payment.settled", `${symbol} payment verified`, `x402 receipt ${result.purchase.transactionId}`, { transactionId: result.purchase.transactionId, hashscanUrl: result.purchase.hashscanUrl, provenance: signal.provenance, price: signal.price });
-        think(`${symbol} settled at ${signal.price} (${signal.provenance}). Receipt ${result.purchase.transactionId} is on HashScan.`);
+        event("payment.settled", `${symbol} payment verified`, `CoinGecko ${symbol} @ $${signal.price} · x402 receipt ${result.purchase.transactionId}`, { transactionId: result.purchase.transactionId, hashscanUrl: result.purchase.hashscanUrl, provenance: signal.provenance, price: signal.price, symbol });
+        think(`${symbol} settled at $${signal.price} from CoinGecko (${signal.provenance}). Receipt ${result.purchase.transactionId} is on HashScan.`);
       }
       record.spentDataHbar = Number(spend) / 1e8;
       const managedAllocations = ASSETS.map((symbol) => rawPortfolio.allocations.find((allocation) => allocation.symbol.toUpperCase() === symbol) ?? {
@@ -188,7 +222,13 @@ export class MultiAssetAgentRunner {
       event("analysis.completed", "Deterministic portfolio evaluation", recommendation.summary, { recommendation });
       if (mode === 2) {
         think("Mode 2 stops at advice — recording the recommendation without proposing an executable order.");
-        record.status = "completed"; record.completedAt = new Date().toISOString(); store.updateRun(runId, record, profileId);
+        record.status = "completed"; record.completedAt = new Date().toISOString();
+        conclude(record, `Conclusion: ${recommendation.summary}`, [
+          `Paid/reused CoinGecko prices for ${Object.keys(prices).join(", ")}.`,
+          `Portfolio marked at about $${(portfolio.totalUsdValue ?? 0).toFixed(2)}.`,
+          "Advise-only mode — no order was proposed or submitted.",
+        ]);
+        store.updateRun(runId, record, profileId);
         sseBroadcaster.broadcast("agent.completed", { runId, record }, { profileId, runId });
         return record;
       }
@@ -250,9 +290,35 @@ export class MultiAssetAgentRunner {
         think("Bands look healthy — no rebalance candidate this cycle.");
       }
       if (record.status !== "waiting_approval") record.status = "completed";
-      record.completedAt = new Date().toISOString(); store.updateRun(runId, record, profileId); sseBroadcaster.broadcast("agent.completed", { runId, record }, { profileId, runId }); return record;
+      record.completedAt = new Date().toISOString();
+      const hbar = portfolio.allocations.find((allocation) => allocation.symbol === "HBAR");
+      const traded = record.tradeExecutions[0];
+      const pending = record.status === "waiting_approval" || record.pendingTradeIds.length > 0;
+      const conclusion = traded
+        ? `Conclusion: rebalanced on-chain — ${traded.amountInFormatted} ${traded.fromSymbol} → ${traded.amountOutFormatted ?? "?"} ${traded.toSymbol}.`
+        : pending
+          ? `Conclusion: prepared a rebalance and paused for your approval.`
+          : record.tradeProposals[0]
+            ? `Conclusion: evaluated a rebalance but did not execute — ${record.events.find((item) => item.kind === "trade.skipped")?.detail ?? recommendation.summary}`
+            : `Conclusion: ${recommendation.summary}`;
+      conclude(record, conclusion, [
+        `CoinGecko-backed prices used for ${Object.keys(prices).join(", ")} (${record.dataPurchases.filter((p) => !p.transactionId.startsWith("cache:")).length} paid x402 reads this cycle).`,
+        `Portfolio about $${(portfolio.totalUsdValue ?? 0).toFixed(2)}${hbar ? ` · HBAR ${hbar.allocationPct.toFixed(1)}% of book` : ""}.`,
+        traded
+          ? `Trade verified: ${traded.transactionId}`
+          : pending
+            ? "Awaiting your approval before any funds move."
+            : "No executable trade cleared policy this cycle.",
+      ]);
+      store.updateRun(runId, record, profileId); sseBroadcaster.broadcast("agent.completed", { runId, record }, { profileId, runId }); return record;
     } catch (error) {
-      record.status = "failed"; record.error = error instanceof Error ? error.message : "Multi-asset agent run failed"; record.completedAt = new Date().toISOString(); event("run.failed", "Run stopped safely", record.error); store.updateRun(runId, record, profileId); sseBroadcaster.broadcast("agent.completed", { runId, record }, { profileId, runId }); return record;
+      record.status = "failed"; record.error = error instanceof Error ? error.message : "Multi-asset agent run failed"; record.completedAt = new Date().toISOString();
+      event("run.failed", "Run stopped safely", record.error);
+      conclude(record, `Conclusion: stopped safely — ${record.error}`, [
+        "No unverified trade was reported as success.",
+        "You can retry once the underlying issue is resolved.",
+      ]);
+      store.updateRun(runId, record, profileId); sseBroadcaster.broadcast("agent.completed", { runId, record }, { profileId, runId }); return record;
     }
   }
 }

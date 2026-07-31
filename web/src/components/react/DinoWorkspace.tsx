@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DinoMark } from "@/components/agent/DinoMark";
 import { EventCard } from "@/components/agent/EventCard";
 import { UserMessage } from "@/components/agent/UserMessage";
+import { ConclusionCard } from "@/components/agent/ConclusionCard";
 import { ProposalGate } from "@/components/agent/ProposalGate";
 import { AutonomyDial } from "@/components/agent/AutonomyDial";
 import { WatchStatus } from "@/components/agent/WatchStatus";
@@ -14,7 +15,7 @@ import { ThinkingReasoning } from "@/components/kit/ThinkingReasoning";
 import type { AgentEvent, AutonomyMode, Limits } from "@/lib/agent-types";
 import { useVariant, useVariants } from "@/lib/variants";
 import { api } from "@/lib/agent-api";
-import { isStreamMetaKind, isUserFacingKind, toEvent, toHoldings, toProposal } from "@/lib/agent-view";
+import { isConclusionKind, isStreamMetaKind, isUserFacingKind, toEvent, toHoldings, toProposal } from "@/lib/agent-view";
 import { signAndExecuteSwap } from "@/lib/wallet-sign";
 import { useAgentDashboard } from "./useAgentDashboard";
 
@@ -83,7 +84,7 @@ export function DinoWorkspace() {
   const awaiting = Boolean(proposal);
   const working = sending || data?.runs?.[0]?.status === "running";
   const run = {
-    events: baseEvents.filter((event) => !isStreamMetaKind(event.kind ?? "")),
+    events: baseEvents.filter((event) => !isStreamMetaKind(event.kind ?? "") && !isConclusionKind(event.kind ?? "")),
     ticks: data?.graph?.ticks?.map((tick) => ({ ...tick, provenance: tick.provenance === "stale" ? "fallback" as const : tick.provenance })) ?? [],
     markers: data?.graph?.markers ?? baseEvents.filter((event) => event.purchase || event.proposal || event.settlement).map((event) => ({ t: event.at, eventId: event.id })),
     halted,
@@ -126,11 +127,12 @@ export function DinoWorkspace() {
         continue;
       }
       if (event.kind === "agent.thinking") continue;
+      const mapped = toEvent(event, receipts);
       items.push({
         type: "event",
         id: event.id,
         at: event.occurredAt ? new Date(event.occurredAt).getTime() : Date.now(),
-        event: toEvent(event, receipts),
+        event: mapped,
       });
     }
     if (thoughtSentences.length > 0 || working) {
@@ -466,6 +468,15 @@ export function DinoWorkspace() {
                               startedAt={item.startedAt}
                             />
                           </div>
+                        );
+                      }
+                      if (isConclusionKind(item.event.kind ?? "")) {
+                        return (
+                          <ConclusionCard
+                            key={item.id}
+                            event={item.event}
+                            bullets={item.event.bullets ?? []}
+                          />
                         );
                       }
                       return (

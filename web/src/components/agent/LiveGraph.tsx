@@ -524,7 +524,7 @@ function GraphHeader({
     <div className="px-5 pt-4">
       <div className="min-w-0">
         <p className="text-[10.5px] tracking-[0.09em] text-ink-3 uppercase">
-          HBAR / USDC · paid feed
+          HBAR / USDC · paid CoinGecko feed
         </p>
         <div className="mt-1.5 flex items-baseline gap-2.5">
           <span className="font-mono text-[26px] leading-none font-medium text-ink tabular-nums">
@@ -648,10 +648,10 @@ export function LiveGraph({
     return (
       <div className="flex h-full min-h-[440px] flex-col rounded-xl border border-line bg-card">
         <div className="px-5 pt-4">
-          <p className="text-[10.5px] tracking-[0.09em] text-ink-3 uppercase">HBAR / USDC · paid feed</p>
-          <p className="mt-3 text-[13px] font-medium text-ink">Waiting for paid intelligence</p>
+          <p className="text-[10.5px] tracking-[0.09em] text-ink-3 uppercase">HBAR / USDC · paid CoinGecko feed</p>
+          <p className="mt-3 text-[13px] font-medium text-ink">Waiting for a paid CoinGecko read</p>
           <p className="mt-1 max-w-md text-[12px] leading-relaxed text-ink-3">
-            The graph draws only paid intelligence retained by agent runs. It will not invent or interpolate market ticks.
+            After the agent buys HBAR intelligence through x402, this chart draws the CoinGecko OHLC history bundled with that paid spot price. It will not invent ticks.
           </p>
         </div>
         <div className="m-5 flex min-h-0 flex-1 items-center justify-center rounded-lg border border-dashed border-line-strong bg-inset/30 font-mono text-[11px] text-ink-3">

@@ -14,6 +14,7 @@ export type AgentEventKind =
   | "agent.thinking"
   | "user.message"
   | "run.triggered"
+  | "run.completed"
   | "run.failed"
   | "portfolio.read"
   | "trade.proposed"

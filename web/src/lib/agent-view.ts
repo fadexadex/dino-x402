@@ -24,6 +24,10 @@ export function isStreamMetaKind(kind: string): boolean {
   return kind === "agent.thinking" || kind === "user.message";
 }
 
+export function isConclusionKind(kind: string): boolean {
+  return kind === "run.completed";
+}
+
 function lifecycle(kind: string): LifecycleStep {
   if (kind === "user.message") return "trigger";
   if (kind.startsWith("agent.")) return "reason";
@@ -97,8 +101,10 @@ export function toEvent(event: RunEvent, receipts: Receipt[] = []): AgentEvent {
         ? "ink"
         : event.kind.includes("failed") || event.kind.includes("blocked") || event.kind.includes("skipped")
           ? "orange"
-          : event.kind.includes("settled") || event.kind.includes("verified")
-            ? "green"
+          : event.kind === "run.completed" || event.kind.includes("settled") || event.kind.includes("verified")
+            ? event.kind === "run.completed" && String(event.detail ?? "").toLowerCase().includes("stopped")
+              ? "orange"
+              : "green"
             : event.kind.includes("payment") || event.kind === "agent.thinking"
               ? "signal"
               : "ink",
@@ -107,7 +113,10 @@ export function toEvent(event: RunEvent, receipts: Receipt[] = []): AgentEvent {
     settlement,
     price: number(payload.price ?? payload.usdPrice),
     kind: event.kind,
-  } as AgentEvent & { price: number; kind: string };
+    bullets: Array.isArray(payload.bullets)
+      ? payload.bullets.filter((item): item is string => typeof item === "string")
+      : undefined,
+  } as AgentEvent & { price: number; kind: string; bullets?: string[] };
 }
 
 type TradeLike = {

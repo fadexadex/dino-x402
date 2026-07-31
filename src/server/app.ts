@@ -24,12 +24,39 @@ import { eventForUi, isUserFacingEvent } from "./events.js";
 
 const jsonSafe = <T>(value: T): T => JSON.parse(JSON.stringify(value, (_key, item) => typeof item === "bigint" ? item.toString() : item)) as T;
 
-const priceFromPurchase = (data: unknown): number | undefined => {
+const unwrapPurchaseBody = (data: unknown): Record<string, unknown> | undefined => {
   if (!data || typeof data !== "object") return undefined;
   const outer = data as Record<string, unknown>;
-  const body = outer.data && typeof outer.data === "object" ? outer.data as Record<string, unknown> : outer;
-  const value = body.price ?? body.close;
+  return outer.data && typeof outer.data === "object" ? outer.data as Record<string, unknown> : outer;
+};
+
+const priceFromPurchase = (data: unknown): number | undefined => {
+  const body = unwrapPurchaseBody(data);
+  const value = body?.price ?? body?.close;
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+};
+
+const historyFromPurchase = (data: unknown): Array<{ t: number; price: number; provenance: "live" | "cached" | "fallback" }> => {
+  const body = unwrapPurchaseBody(data);
+  const history = body?.history;
+  if (!Array.isArray(history)) return [];
+  const provenance = body?.isLive === false || String(body?.source ?? "").includes("fallback") ? "fallback" as const : "live" as const;
+  return history.flatMap((point) => {
+    if (!point || typeof point !== "object") return [];
+    const row = point as Record<string, unknown>;
+    const t = typeof row.t === "number" ? row.t : typeof row.timestamp === "number" ? row.timestamp : NaN;
+    const price = typeof row.price === "number" ? row.price : typeof row.close === "number" ? row.close : NaN;
+    if (!Number.isFinite(t) || !Number.isFinite(price) || price <= 0) return [];
+    return [{ t, price, provenance }];
+  });
+};
+
+const asOfFromPurchase = (data: unknown, fallbackIso: string): number => {
+  const outer = data && typeof data === "object" ? data as Record<string, unknown> : undefined;
+  const body = unwrapPurchaseBody(data);
+  const raw = body?.lastUpdatedAt ?? outer?.asOf ?? fallbackIso;
+  const parsed = typeof raw === "string" || typeof raw === "number" ? Date.parse(String(raw)) : NaN;
+  return Number.isFinite(parsed) ? parsed : Date.parse(fallbackIso);
 };
 
 const proposalForUi = (trade: import("../store/types.js").PendingTrade, slippageBps: number) => {
@@ -358,30 +385,60 @@ export const createApp = (
     const ticks = runs.flatMap((run) => {
       const portfolio = run.portfolioBefore;
       if (series === "PORTFOLIO") return typeof portfolio?.totalUsdValue === "number" ? [{ t: Date.parse(portfolio.fetchedAt), price: portfolio.totalUsdValue, value: portfolio.totalUsdValue, provenance: portfolio.provenance }] : [];
-      // Include in-progress purchases so the chart updates as each x402 settle lands.
+      // Prefer CoinGecko history bundled with paid reads; fall back to spot samples.
       return run.dataPurchases
         .filter((purchase) => purchase.symbol.toUpperCase() === series)
-        .map((purchase) => {
-          const price = priceFromPurchase(purchase.data);
-          if (price === undefined) return null;
-          const at = Date.parse(run.completedAt ?? run.startedAt);
-          return { t: at, price, value: price, provenance: "live" as const };
-        })
-        .filter((tick): tick is { t: number; price: number; value: number; provenance: "live" } => tick !== null);
+        .flatMap((purchase) => {
+          const history = historyFromPurchase(purchase.data);
+          const spot = priceFromPurchase(purchase.data);
+          const at = asOfFromPurchase(purchase.data, run.completedAt ?? run.startedAt);
+          const body = unwrapPurchaseBody(purchase.data);
+          const provenance = body?.isLive === false || String(body?.source ?? "").includes("fallback")
+            ? "fallback" as const
+            : purchase.transactionId.startsWith("cache:")
+              ? "cached" as const
+              : "live" as const;
+          const spots = spot === undefined ? [] : [{ t: at, price: spot, value: spot, provenance }];
+          return [
+            ...history.map((point) => ({ t: point.t, price: point.price, value: point.price, provenance: point.provenance })),
+            ...spots,
+          ];
+        });
     });
-    // Deduplicate same-timestamp ticks so repeated cache hits don't stack.
-    const deduped = [...new Map(ticks.map((tick) => [`${tick.t}:${tick.price}`, tick])).values()].sort((a, b) => a.t - b.t);
+    // Also lift priced SSE observations (cache reuse) so the chart keeps moving between paid buys.
+    const observationTicks = store.replayEvents(undefined, profile.id).map(eventForUi).flatMap((event) => {
+      if (event.kind !== "data.received" && event.kind !== "payment.settled") return [];
+      const payload = event.payload as Record<string, unknown> | undefined;
+      const price = typeof payload?.price === "number" ? payload.price : undefined;
+      const symbol = typeof payload?.symbol === "string" ? payload.symbol.toUpperCase() : "";
+      if (price === undefined || !Number.isFinite(price) || (symbol && symbol !== series)) return [];
+      // Titles like "HBAR payment verified" / "HBAR intelligence reused" when symbol missing.
+      if (!symbol && !(event.title ?? "").toUpperCase().startsWith(series)) return [];
+      const provenance = event.provenance === "stale" ? "fallback" as const : (event.provenance === "cached" ? "cached" as const : "live" as const);
+      return [{ t: Date.parse(event.occurredAt ?? ""), price, value: price, provenance }];
+    });
+    const merged = [...ticks, ...observationTicks];
+    // Deduplicate same-timestamp ticks; keep denser CoinGecko history intact.
+    const deduped = [...new Map(merged.map((tick) => [`${tick.t}:${tick.price}`, tick])).values()].sort((a, b) => a.t - b.t);
     const markers = store.replayEvents(undefined, profile.id).map(eventForUi)
       .filter((event) => ["payment.settled", "trade.proposed", "trade.submitted", "trade.verified"].includes(event.kind))
       .map((event) => ({ t: Date.parse(event.occurredAt ?? ""), eventId: event.id, kind: event.kind, label: event.title, provenance: event.provenance }));
-    return c.json(jsonSafe({ series: series === "PORTFOLIO" ? "portfolio" : series, ticks: deduped, markers, weights }));
+    return c.json(jsonSafe({
+      series: series === "PORTFOLIO" ? "portfolio" : series,
+      ticks: deduped,
+      markers,
+      weights,
+      source: deduped.length > 2 ? "coingecko-history+spot" : deduped.length > 0 ? "paid-spot" : "empty",
+    }));
   });
 
   app.get("/api/v1/profiles/:profileId/receipts", (c) => {
     const profile = store.getProfile(c.req.param("profileId"));
     if (!profile) return c.json({ error: "Profile not found" }, 404);
     const receipts = store.getState().runs.filter((run) => run.accountId === profile.accountId).flatMap((run) => [
-      ...run.dataPurchases.map((purchase) => ({ id: `data:${run.id}:${purchase.transactionId}`, kind: "data_purchase", runId: run.id, occurredAt: run.completedAt ?? run.startedAt, status: "confirmed", asset: "HBAR", amountHbar: purchase.amountHbar, productId: purchase.productId, symbol: purchase.symbol, transactionId: purchase.transactionId, hashscanUrl: purchase.hashscanUrl, provenance: "live" })),
+      ...run.dataPurchases
+        .filter((purchase) => !purchase.transactionId.startsWith("cache:") && purchase.amountHbar > 0)
+        .map((purchase) => ({ id: `data:${run.id}:${purchase.transactionId}`, kind: "data_purchase", runId: run.id, occurredAt: run.completedAt ?? run.startedAt, status: "confirmed", asset: "HBAR", amountHbar: purchase.amountHbar, productId: purchase.productId, symbol: purchase.symbol, transactionId: purchase.transactionId, hashscanUrl: purchase.hashscanUrl, provenance: "live" })),
       ...run.tradeExecutions.map((trade) => ({ id: `trade:${trade.transactionId}`, kind: "trade", runId: run.id, occurredAt: run.completedAt ?? run.startedAt, status: trade.success ? "confirmed" : "failed", transactionId: trade.transactionId, hashscanUrl: trade.hashscanUrl, fromSymbol: trade.fromSymbol, toSymbol: trade.toSymbol, amountIn: trade.amountIn, amountOut: trade.amountOut, provenance: "live" })),
     ]);
     return c.json(jsonSafe({ receipts }));

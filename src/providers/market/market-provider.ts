@@ -148,6 +148,21 @@ export class MarketDataProvider implements DataProvider {
       const quote = payload[coinId];
       if (!quote || typeof quote.usd !== "number") throw new Error("CoinGecko returned no price");
 
+      // Attach a short CoinGecko OHLC sparkline so the workspace graph has a real
+      // series from the same paid read — not just a single spot sample.
+      let history: Array<{ t: number; price: number }> = [];
+      try {
+        const candles = await fetchJson<[number, number, number, number, number][]>(
+          `https://api.coingecko.com/api/v3/coins/${coinId}/ohlc?vs_currency=usd&days=1`,
+          5 * 60_000,
+        );
+        history = candles
+          .filter((candle) => Array.isArray(candle) && typeof candle[0] === "number" && typeof candle[4] === "number")
+          .map(([timestamp, , , , close]) => ({ t: timestamp, price: close }));
+      } catch {
+        history = [];
+      }
+
       const common = {
         currency: "USD",
         source: "CoinGecko",
@@ -155,6 +170,7 @@ export class MarketDataProvider implements DataProvider {
         lastUpdatedAt: quote.last_updated_at
           ? new Date(quote.last_updated_at * 1000).toISOString()
           : undefined,
+        ...(history.length > 0 ? { history } : {}),
       };
       const data = productId === "spot-price"
         ? { price: quote.usd, ...common }
