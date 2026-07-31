@@ -259,13 +259,16 @@ export class MultiAssetAgentRunner {
       const portfolio = valuePortfolio({ ...rawPortfolio, allocations: managedAllocations }, prices);
       record.portfolioBefore = portfolio; store.updateRun(runId, { portfolioBefore: portfolio, dataPurchases: record.dataPurchases, spentDataHbar: record.spentDataHbar }, profileId);
       const mandate = profileId ? store.getLatestMandate(profileId) : undefined;
-      const bands = (mandate?.allocations?.length ? mandate.allocations : DEFAULT_BANDS).map((band) => ({
-        symbol: band.symbol,
-        minPct: band.minPct,
-        targetPct: band.targetPct,
-        maxPct: band.maxPct,
-        ...("tokenId" in band && band.tokenId ? { tokenId: band.tokenId } : {}),
-      }));
+      const bands = (mandate?.allocations?.length ? mandate.allocations : DEFAULT_BANDS).map((band) => {
+        const tokenId = "tokenId" in band && typeof band.tokenId === "string" ? band.tokenId : undefined;
+        return {
+          symbol: band.symbol,
+          minPct: band.minPct,
+          targetPct: band.targetPct,
+          maxPct: band.maxPct,
+          ...(tokenId ? { tokenId } : {}),
+        };
+      });
       think("All three paid CoinGecko reads are in. Comparing each sleeve against its allocation band next.");
       const candidate = proposeBandRebalance(portfolio.allocations, bands);
       const narrative = portfolioInsightNarrative({
