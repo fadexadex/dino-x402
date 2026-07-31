@@ -17,19 +17,46 @@ import { store } from "../store/index.js";
 import { sseBroadcaster } from "./stream.js";
 import { readPortfolio } from "../portfolio/reader.js";
 import { executeSaucerSwap } from "../trading/executor.js";
-import { validateAllocationBands } from "../portfolio/allocation.js";
+import { mergeLivePortfolioValuation, pricesUsdFromPortfolio, validateAllocationBands, valuePortfolio } from "../portfolio/allocation.js";
 import type { AgentRunInput } from "../agent/types.js";
 import type { DurableEvent, PortfolioMandate, PortfolioProfile, ScheduleConfig } from "../store/types.js";
 import { eventForUi, isUserFacingEvent } from "./events.js";
 
 const jsonSafe = <T>(value: T): T => JSON.parse(JSON.stringify(value, (_key, item) => typeof item === "bigint" ? item.toString() : item)) as T;
 
-const priceFromPurchase = (data: unknown): number | undefined => {
+const unwrapPurchaseBody = (data: unknown): Record<string, unknown> | undefined => {
   if (!data || typeof data !== "object") return undefined;
   const outer = data as Record<string, unknown>;
-  const body = outer.data && typeof outer.data === "object" ? outer.data as Record<string, unknown> : outer;
-  const value = body.price ?? body.close;
+  return outer.data && typeof outer.data === "object" ? outer.data as Record<string, unknown> : outer;
+};
+
+const priceFromPurchase = (data: unknown): number | undefined => {
+  const body = unwrapPurchaseBody(data);
+  const value = body?.price ?? body?.close;
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+};
+
+const historyFromPurchase = (data: unknown): Array<{ t: number; price: number; provenance: "live" | "cached" | "fallback" }> => {
+  const body = unwrapPurchaseBody(data);
+  const history = body?.history;
+  if (!Array.isArray(history)) return [];
+  const provenance = body?.isLive === false || String(body?.source ?? "").includes("fallback") ? "fallback" as const : "live" as const;
+  return history.flatMap((point) => {
+    if (!point || typeof point !== "object") return [];
+    const row = point as Record<string, unknown>;
+    const t = typeof row.t === "number" ? row.t : typeof row.timestamp === "number" ? row.timestamp : NaN;
+    const price = typeof row.price === "number" ? row.price : typeof row.close === "number" ? row.close : NaN;
+    if (!Number.isFinite(t) || !Number.isFinite(price) || price <= 0) return [];
+    return [{ t, price, provenance }];
+  });
+};
+
+const asOfFromPurchase = (data: unknown, fallbackIso: string): number => {
+  const outer = data && typeof data === "object" ? data as Record<string, unknown> : undefined;
+  const body = unwrapPurchaseBody(data);
+  const raw = body?.lastUpdatedAt ?? outer?.asOf ?? fallbackIso;
+  const parsed = typeof raw === "string" || typeof raw === "number" ? Date.parse(String(raw)) : NaN;
+  return Number.isFinite(parsed) ? parsed : Date.parse(fallbackIso);
 };
 
 const proposalForUi = (trade: import("../store/types.js").PendingTrade, slippageBps: number) => {
@@ -147,6 +174,7 @@ export const createApp = (
               toToken: trade.quote.toToken,
               amountIn: trade.quote.amountIn.toString(),
               expectedAmountOut: trade.quote.expectedAmountOut.toString(),
+              amountInFormatted: trade.quote.amountInFormatted,
             },
           },
         },
@@ -171,9 +199,39 @@ export const createApp = (
     }
     const updated = store.updatePendingTrade(tradeId, { status: "approved", executionResult: result }, profileId);
     const run = store.getState().runs.find((item) => item.id === trade.runId);
-    if (run) store.updateRun(run.id, { status: "completed", tradeExecutions: [...run.tradeExecutions, result] }, profileId);
+    let portfolioAfter = run?.portfolioAfter;
+    if (run?.portfolioBefore) {
+      try {
+        const afterRaw = await readPortfolio(trade.accountId, { mirrorBaseUrl: config.mirrorNodeBaseUrl });
+        const prices = pricesUsdFromPortfolio(run.portfolioBefore);
+        const managed = ["HBAR", "USDC", "SAUCE"].map((symbol) => afterRaw.allocations.find((item) => item.symbol.toUpperCase() === symbol) ?? {
+          symbol,
+          balanceFormatted: 0,
+          usdValue: 0,
+          allocationPct: 0,
+        });
+        portfolioAfter = valuePortfolio({ ...afterRaw, allocations: managed }, prices);
+      } catch {
+        portfolioAfter = undefined;
+      }
+    }
+    if (run) {
+      store.updateRun(run.id, {
+        status: "completed",
+        tradeExecutions: [...run.tradeExecutions, result],
+        ...(portfolioAfter ? { portfolioAfter } : {}),
+      }, profileId);
+    }
     store.recordSpend(0, trade.proposal.amountFormatted, profileId);
     sseBroadcaster.broadcast("trade.verified", { tradeId, result }, { profileId, runId: trade.runId, provenance: "live" });
+    if (portfolioAfter) {
+      sseBroadcaster.broadcast("portfolio.updated", {
+        tradeId,
+        portfolio: portfolioAfter,
+        title: "Portfolio refreshed after the swap",
+        detail: "Balances and mix updated from live holdings.",
+      }, { profileId, runId: trade.runId, provenance: "live" });
+    }
     return { status: 200 as const, body: { status: "approved", trade: updated, execution: result } };
   };
 
@@ -283,7 +341,8 @@ export const createApp = (
       return run.status === "waiting_approval" && hasPendingTrade(run.id);
     };
     const runs = state.runs.filter(runsForProfile).map((run) => run.status === "waiting_approval" && !hasPendingTrade(run.id) ? { ...run, status: "completed" as const } : run);
-    const latest = runs.find((run) => run.portfolioBefore)?.portfolioBefore;
+    const latestValued = runs.find((run) => run.portfolioAfter)?.portfolioAfter
+      ?? runs.find((run) => run.portfolioBefore)?.portfolioBefore;
     const pending = state.pendingTrades.filter((trade) => trade.accountId === profile.accountId && trade.status === "pending");
     const events = store.replayEvents(undefined, profile.id).filter(isUserFacingEvent).map(eventForUi);
     const schedule = { cadenceMinutes: state.schedule.intervalMinutes, paused: !state.schedule.enabled, nextRunAt: state.schedule.nextRunAt, lastRunAt: runs[0]?.startedAt, autonomyMode: profile.autonomyMode ?? 3 };
@@ -298,39 +357,29 @@ export const createApp = (
     } | null = null;
     try {
       const live = await readPortfolio(profile.accountId, { mirrorBaseUrl: config.mirrorNodeBaseUrl });
-      const assets = live.allocations.map((asset) => {
-        const priced = latest?.allocations.find((item) => item.symbol === asset.symbol);
-        return {
-          symbol: asset.symbol,
-          balance: asset.balanceFormatted,
-          usdValue: priced?.usdValue ?? asset.usdValue,
-          allocationPct: priced?.allocationPct ?? asset.allocationPct,
-          provenance: priced ? latest!.provenance : live.provenance,
-        };
-      });
-      const totalUsd = assets.reduce((sum, asset) => sum + (asset.usdValue || 0), 0);
+      const merged = mergeLivePortfolioValuation(live, latestValued);
       portfolio = {
         accountId: live.accountId,
         asOf: live.fetchedAt,
-        totalUsd,
-        provenance: totalUsd > 0 && latest ? latest.provenance : live.provenance,
-        assets,
-        valued: totalUsd > 0,
+        totalUsd: merged.totalUsd,
+        provenance: merged.provenance,
+        assets: merged.assets,
+        valued: merged.valued,
       };
     } catch {
-      if (latest) {
-        const totalUsd = latest.totalUsdValue ?? 0;
+      if (latestValued) {
+        const totalUsd = latestValued.totalUsdValue ?? 0;
         portfolio = {
-          accountId: latest.accountId,
-          asOf: latest.fetchedAt,
+          accountId: latestValued.accountId,
+          asOf: latestValued.fetchedAt,
           totalUsd,
-          provenance: latest.provenance,
-          assets: latest.allocations.map((asset) => ({
+          provenance: latestValued.provenance,
+          assets: latestValued.allocations.map((asset) => ({
             symbol: asset.symbol,
             balance: asset.balanceFormatted,
             usdValue: asset.usdValue,
             allocationPct: asset.allocationPct,
-            provenance: latest.provenance,
+            provenance: latestValued.provenance,
           })),
           valued: totalUsd > 0,
         };
@@ -349,24 +398,69 @@ export const createApp = (
     if (!profile) return c.json({ error: "Profile not found" }, 404);
     const series = (c.req.query("series") ?? "portfolio").toUpperCase();
     const runs = store.getState().runs.filter((run) => run.accountId === profile.accountId).slice().reverse();
-    const ticks = runs.flatMap((run) => {
-      const portfolio = run.portfolioBefore;
-      if (series === "PORTFOLIO") return typeof portfolio?.totalUsdValue === "number" ? [{ t: Date.parse(portfolio.fetchedAt), price: portfolio.totalUsdValue, value: portfolio.totalUsdValue, provenance: portfolio.provenance }] : [];
-      const price = run.dataPurchases.filter((purchase) => purchase.symbol.toUpperCase() === series).map((purchase) => priceFromPurchase(purchase.data)).find((value): value is number => value !== undefined);
-      const at = run.dataPurchases.find((purchase) => purchase.symbol.toUpperCase() === series) ? run.completedAt ?? run.startedAt : undefined;
-      return price !== undefined && at ? [{ t: Date.parse(at), price, value: price, provenance: "live" as const }] : [];
+    const weights = runs.flatMap((run) => {
+      const portfolio = run.portfolioAfter ?? run.portfolioBefore;
+      const hbar = portfolio?.allocations?.find((allocation) => allocation.symbol.toUpperCase() === "HBAR");
+      if (typeof hbar?.allocationPct !== "number") return [];
+      return [{ t: Date.parse(run.completedAt ?? run.startedAt), weight: hbar.allocationPct }];
     });
+    const ticks = runs.flatMap((run) => {
+      const portfolio = run.portfolioAfter ?? run.portfolioBefore;
+      if (series === "PORTFOLIO") return typeof portfolio?.totalUsdValue === "number" ? [{ t: Date.parse(portfolio.fetchedAt), price: portfolio.totalUsdValue, value: portfolio.totalUsdValue, provenance: portfolio.provenance }] : [];
+      // Prefer CoinGecko history bundled with paid reads; fall back to spot samples.
+      return run.dataPurchases
+        .filter((purchase) => purchase.symbol.toUpperCase() === series)
+        .flatMap((purchase) => {
+          const history = historyFromPurchase(purchase.data);
+          const spot = priceFromPurchase(purchase.data);
+          const at = asOfFromPurchase(purchase.data, run.completedAt ?? run.startedAt);
+          const body = unwrapPurchaseBody(purchase.data);
+          const provenance = body?.isLive === false || String(body?.source ?? "").includes("fallback")
+            ? "fallback" as const
+            : purchase.transactionId.startsWith("cache:")
+              ? "cached" as const
+              : "live" as const;
+          const spots = spot === undefined ? [] : [{ t: at, price: spot, value: spot, provenance }];
+          return [
+            ...history.map((point) => ({ t: point.t, price: point.price, value: point.price, provenance: point.provenance })),
+            ...spots,
+          ];
+        });
+    });
+    // Also lift priced SSE observations (cache reuse) so the chart keeps moving between paid buys.
+    const observationTicks = store.replayEvents(undefined, profile.id).map(eventForUi).flatMap((event) => {
+      if (event.kind !== "data.received" && event.kind !== "payment.settled") return [];
+      const payload = event.payload as Record<string, unknown> | undefined;
+      const price = typeof payload?.price === "number" ? payload.price : undefined;
+      const symbol = typeof payload?.symbol === "string" ? payload.symbol.toUpperCase() : "";
+      if (price === undefined || !Number.isFinite(price) || (symbol && symbol !== series)) return [];
+      // Titles like "HBAR payment verified" / "HBAR intelligence reused" when symbol missing.
+      if (!symbol && !(event.title ?? "").toUpperCase().startsWith(series)) return [];
+      const provenance = event.provenance === "stale" ? "fallback" as const : (event.provenance === "cached" ? "cached" as const : "live" as const);
+      return [{ t: Date.parse(event.occurredAt ?? ""), price, value: price, provenance }];
+    });
+    const merged = [...ticks, ...observationTicks];
+    // Deduplicate same-timestamp ticks; keep denser CoinGecko history intact.
+    const deduped = [...new Map(merged.map((tick) => [`${tick.t}:${tick.price}`, tick])).values()].sort((a, b) => a.t - b.t);
     const markers = store.replayEvents(undefined, profile.id).map(eventForUi)
-      .filter((event) => ["payment.settled", "trade.proposed", "trade.verified"].includes(event.kind))
+      .filter((event) => ["payment.settled", "trade.proposed", "trade.submitted", "trade.verified"].includes(event.kind))
       .map((event) => ({ t: Date.parse(event.occurredAt ?? ""), eventId: event.id, kind: event.kind, label: event.title, provenance: event.provenance }));
-    return c.json(jsonSafe({ series: series === "PORTFOLIO" ? "portfolio" : series, ticks, markers }));
+    return c.json(jsonSafe({
+      series: series === "PORTFOLIO" ? "portfolio" : series,
+      ticks: deduped,
+      markers,
+      weights,
+      source: deduped.length > 2 ? "coingecko-history+spot" : deduped.length > 0 ? "paid-spot" : "empty",
+    }));
   });
 
   app.get("/api/v1/profiles/:profileId/receipts", (c) => {
     const profile = store.getProfile(c.req.param("profileId"));
     if (!profile) return c.json({ error: "Profile not found" }, 404);
     const receipts = store.getState().runs.filter((run) => run.accountId === profile.accountId).flatMap((run) => [
-      ...run.dataPurchases.map((purchase) => ({ id: `data:${run.id}:${purchase.transactionId}`, kind: "data_purchase", runId: run.id, occurredAt: run.completedAt ?? run.startedAt, status: "confirmed", asset: "HBAR", amountHbar: purchase.amountHbar, productId: purchase.productId, symbol: purchase.symbol, transactionId: purchase.transactionId, hashscanUrl: purchase.hashscanUrl, provenance: "live" })),
+      ...run.dataPurchases
+        .filter((purchase) => !purchase.transactionId.startsWith("cache:") && purchase.amountHbar > 0)
+        .map((purchase) => ({ id: `data:${run.id}:${purchase.transactionId}`, kind: "data_purchase", runId: run.id, occurredAt: run.completedAt ?? run.startedAt, status: "confirmed", asset: "HBAR", amountHbar: purchase.amountHbar, productId: purchase.productId, symbol: purchase.symbol, transactionId: purchase.transactionId, hashscanUrl: purchase.hashscanUrl, provenance: "live" })),
       ...run.tradeExecutions.map((trade) => ({ id: `trade:${trade.transactionId}`, kind: "trade", runId: run.id, occurredAt: run.completedAt ?? run.startedAt, status: trade.success ? "confirmed" : "failed", transactionId: trade.transactionId, hashscanUrl: trade.hashscanUrl, fromSymbol: trade.fromSymbol, toSymbol: trade.toSymbol, amountIn: trade.amountIn, amountOut: trade.amountOut, provenance: "live" })),
     ]);
     return c.json(jsonSafe({ receipts }));
@@ -376,21 +470,36 @@ export const createApp = (
     const profile = store.getProfile(c.req.param("profileId"));
     if (!profile) return c.json({ error: "Profile not found" }, 404);
     try {
-      const latest = store.getState().runs.find((run) => run.accountId === profile.accountId && run.portfolioBefore)?.portfolioBefore;
-      const portfolio = latest ?? await readPortfolio(profile.accountId, { mirrorBaseUrl: config.mirrorNodeBaseUrl });
-      return c.json(jsonSafe({
-        accountId: profile.accountId,
-        asOf: portfolio.fetchedAt,
-        totalUsd: portfolio.totalUsdValue,
-        provenance: portfolio.provenance,
-        assets: portfolio.allocations.map((asset) => ({
-          symbol: asset.symbol,
-          balance: asset.balanceFormatted,
-          usdValue: asset.usdValue,
-          allocationPct: asset.allocationPct,
-          provenance: portfolio.provenance,
-        })),
-      }));
+      const latestValued = store.getState().runs.find((run) => run.accountId === profile.accountId && run.portfolioAfter)?.portfolioAfter
+        ?? store.getState().runs.find((run) => run.accountId === profile.accountId && run.portfolioBefore)?.portfolioBefore;
+      try {
+        const live = await readPortfolio(profile.accountId, { mirrorBaseUrl: config.mirrorNodeBaseUrl });
+        const merged = mergeLivePortfolioValuation(live, latestValued);
+        return c.json(jsonSafe({
+          accountId: profile.accountId,
+          asOf: live.fetchedAt,
+          totalUsd: merged.totalUsd,
+          provenance: merged.provenance,
+          assets: merged.assets,
+          valued: merged.valued,
+        }));
+      } catch {
+        if (!latestValued) throw new Error("Unable to read live portfolio");
+        return c.json(jsonSafe({
+          accountId: profile.accountId,
+          asOf: latestValued.fetchedAt,
+          totalUsd: latestValued.totalUsdValue,
+          provenance: latestValued.provenance,
+          assets: latestValued.allocations.map((asset) => ({
+            symbol: asset.symbol,
+            balance: asset.balanceFormatted,
+            usdValue: asset.usdValue,
+            allocationPct: asset.allocationPct,
+            provenance: latestValued.provenance,
+          })),
+          valued: (latestValued.totalUsdValue ?? 0) > 0,
+        }));
+      }
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : "Unable to read portfolio" }, 503);
     }
@@ -547,14 +656,48 @@ export const createApp = (
       };
       store.updatePendingTrade(trade.id, { status: "approved", executionResult: result }, profileId);
       const run = store.getState().runs.find((item) => item.id === trade.runId);
-      if (run) store.updateRun(run.id, { status: "completed", tradeExecutions: [...run.tradeExecutions, result], completedAt: new Date().toISOString() }, profileId);
+      let portfolioAfter = run?.portfolioAfter;
+      if (run?.portfolioBefore) {
+        try {
+          const afterRaw = await readPortfolio(trade.accountId, { mirrorBaseUrl: config.mirrorNodeBaseUrl });
+          const prices = pricesUsdFromPortfolio(run.portfolioBefore);
+          const managed = ["HBAR", "USDC", "SAUCE"].map((symbol) => afterRaw.allocations.find((item) => item.symbol.toUpperCase() === symbol) ?? {
+            symbol,
+            balanceFormatted: 0,
+            usdValue: 0,
+            allocationPct: 0,
+          });
+          portfolioAfter = valuePortfolio({ ...afterRaw, allocations: managed }, prices);
+        } catch {
+          portfolioAfter = undefined;
+        }
+      }
+      if (run) {
+        store.updateRun(run.id, {
+          status: "completed",
+          tradeExecutions: [...run.tradeExecutions, result],
+          completedAt: new Date().toISOString(),
+          ...(portfolioAfter ? { portfolioAfter } : {}),
+        }, profileId);
+      }
+      store.recordSpend(0, trade.proposal.amountFormatted, profileId);
       sseBroadcaster.broadcast("trade.verified", {
         presentInUi: true,
-        title: "Trade signed in wallet",
-        detail: `Wallet submitted ${transactionId}`,
+        title: "Swap completed in your wallet",
+        detail: `Your wallet confirmed the exchange.`,
         tradeId: trade.id,
         result,
+        transactionId,
       }, { profileId, runId: trade.runId, provenance: "live" });
+      if (portfolioAfter) {
+        sseBroadcaster.broadcast("portfolio.updated", {
+          presentInUi: true,
+          title: "Portfolio refreshed after the swap",
+          detail: "Balances and mix updated from live holdings.",
+          tradeId: trade.id,
+          portfolio: portfolioAfter,
+        }, { profileId, runId: trade.runId, provenance: "live" });
+      }
       return c.json(jsonSafe({ status: "confirmed", tradeId: trade.id, execution: result }));
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : "Confirm failed" }, 502);
@@ -751,9 +894,14 @@ export const createApp = (
           updatedAt: now,
         });
         store.updateSchedule({ enabled: true, autonomousTrading: true });
+        agentScheduler.start();
         if (body.objective) {
           const previous = store.getLatestMandate(updated.id);
           if (previous) store.saveMandate({ ...previous, id: crypto.randomUUID(), version: previous.version + 1, objective: body.objective, createdAt: now });
+        }
+        // Pause any prior user-wallet profile so the dashboard prefers the agent treasury.
+        if (userWallet && userWallet.status === "active") {
+          store.upsertProfile({ ...userWallet, status: "paused", updatedAt: now });
         }
         sseBroadcaster.broadcast("profile.schedule.updated", { autonomyMode: 4 }, { profileId: updated.id });
         return c.json(jsonSafe({ profile: updated, autonomyMode: 4, custody: "agent_managed" }));
@@ -765,10 +913,15 @@ export const createApp = (
         autonomyMode: body.autonomyMode,
         updatedAt: now,
       });
+      // Keep agent treasury inactive while living in approval-gated wallet custody.
+      const agentManaged = (store.getState().profiles ?? []).find((item) => item.kind === "agent_managed" && item.status === "active");
+      if (agentManaged) store.upsertProfile({ ...agentManaged, status: "paused", updatedAt: now });
       store.updateSchedule({
         enabled: body.autonomyMode >= 2,
         autonomousTrading: false,
       });
+      if (body.autonomyMode >= 2) agentScheduler.start();
+      else agentScheduler.stop();
       if (body.objective) {
         const previous = store.getLatestMandate(profile.id);
         if (previous) store.saveMandate({ ...previous, id: crypto.randomUUID(), version: previous.version + 1, objective: body.objective, createdAt: now });

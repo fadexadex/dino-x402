@@ -5,7 +5,7 @@ const INTERNAL_TYPE = /^(profile\.|account\.|mandate\.|schedule\.|spending\.|sch
 
 /** Lifecycle kinds the workspace is allowed to show. */
 const USER_FACING_KIND =
-  /^(portfolio\.|payment\.|data\.|analysis\.|trade\.|run\.(completed|failed|no_action|triggered)|system\.(halted|resumed))/;
+  /^(portfolio\.|payment\.|data\.|analysis\.|agent\.thinking|user\.message|trade\.|run\.(completed|failed|no_action|triggered)|system\.(halted|resumed))/;
 
 export function eventForUi(event: DurableEvent) {
   const payload = event.payload as Record<string, unknown> | undefined;

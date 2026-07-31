@@ -36,24 +36,28 @@ function Actions({
   onApprove,
   onDecline,
   left,
+  busy,
 }: {
   onApprove: () => void;
   onDecline: () => void;
   left: number;
+  busy?: boolean;
 }) {
   return (
     <div className="mt-3 flex flex-wrap items-center gap-2">
       <button
         type="button"
         onClick={onApprove}
-        className="rounded-control bg-signal px-3.5 py-2 text-[12.5px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
+        disabled={busy}
+        className="rounded-control bg-signal px-3.5 py-2 text-[12.5px] font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
       >
-        Approve in wallet
+        {busy ? "Waiting on wallet…" : "Approve in wallet"}
       </button>
       <button
         type="button"
         onClick={onDecline}
-        className="rounded-control border border-line px-3.5 py-2 text-[12.5px] font-medium text-ink-2 transition-colors hover:bg-hover"
+        disabled={busy}
+        className="rounded-control border border-line px-3.5 py-2 text-[12.5px] font-medium text-ink-2 transition-colors hover:bg-hover disabled:opacity-50"
       >
         Decline
       </button>
@@ -77,10 +81,12 @@ export function ProposalGate({
   proposal,
   onApprove,
   onDecline,
+  busy,
 }: {
   proposal: Proposal;
   onApprove: () => void;
   onDecline: () => void;
+  busy?: boolean;
 }) {
   const variant = useVariant("proposal");
   const left = useCountdown(proposal.expiresAt);
@@ -123,16 +129,18 @@ export function ProposalGate({
             <button
               type="button"
               onClick={onDecline}
-              className="rounded-control border border-line px-3 py-1.5 text-[12px] font-medium text-ink-2 hover:bg-hover"
+              disabled={busy}
+              className="rounded-control border border-line px-3 py-1.5 text-[12px] font-medium text-ink-2 hover:bg-hover disabled:opacity-50"
             >
               Decline
             </button>
             <button
               type="button"
               onClick={onApprove}
-              className="rounded-control bg-signal px-3 py-1.5 text-[12px] font-medium text-primary-foreground hover:opacity-90"
+              disabled={busy}
+              className="rounded-control bg-signal px-3 py-1.5 text-[12px] font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
             >
-              Approve
+              {busy ? "Waiting…" : "Approve in wallet"}
             </button>
           </div>
         </div>
@@ -158,7 +166,7 @@ export function ProposalGate({
           {breach}
           <Terms proposal={proposal} />
           <Warning />
-          <Actions onApprove={onApprove} onDecline={onDecline} left={left} />
+          <Actions onApprove={onApprove} onDecline={onDecline} left={left} busy={busy} />
         </div>
       </div>
     );
@@ -172,7 +180,7 @@ export function ProposalGate({
       {breach}
       <Terms proposal={proposal} />
       <Warning />
-      <Actions onApprove={onApprove} onDecline={onDecline} left={left} />
+      <Actions onApprove={onApprove} onDecline={onDecline} left={left} busy={busy} />
     </div>
   );
 }

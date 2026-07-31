@@ -17,6 +17,8 @@ export interface PortfolioAllocation {
   balanceFormatted: number;
   usdValue: number;
   allocationPct: number;
+  /** Paid USD mark used for this sleeve; kept even when balance is zero. */
+  markPriceUsd?: number;
 }
 
 export interface Portfolio {

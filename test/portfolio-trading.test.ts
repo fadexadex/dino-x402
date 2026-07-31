@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readPortfolio } from "../src/portfolio/reader.js";
-import { proposeBandRebalance, validateAllocationBands, valuePortfolio } from "../src/portfolio/allocation.js";
+import { mergeLivePortfolioValuation, pricesUsdFromPortfolio, proposeBandRebalance, validateAllocationBands, valuePortfolio } from "../src/portfolio/allocation.js";
 import { TradePolicy } from "../src/trading/policy.js";
 import { buildExactInputTransaction, encodeV2Path, minimumOutput, quoteSaucerExactInput, resolveAccountEvmAddress, resolveSaucerRoute } from "../src/trading/saucerswap.js";
 import { verifyMirrorSwap } from "../src/trading/verification.js";
@@ -26,7 +26,7 @@ describe("live portfolio and deterministic allocation", () => {
     expect(valued.totalUsdValue).toBeCloseTo(1.373);
   });
 
-  it("proposes only an oversized allocation toward an asset below its hard floor", () => {
+  it("proposes selling an oversized sleeve toward target while funding an under-floor asset", () => {
     const candidate = proposeBandRebalance([
       { symbol: "HBAR", balanceFormatted: 80, usdValue: 80, allocationPct: 80 },
       { symbol: "USDC", balanceFormatted: 20, usdValue: 20, allocationPct: 20 },
@@ -36,8 +36,59 @@ describe("live portfolio and deterministic allocation", () => {
       { symbol: "USDC", minPct: 25, targetPct: 33, maxPct: 45 },
       { symbol: "SAUCE", minPct: 10, targetPct: 33, maxPct: 40 },
     ]);
-    expect(candidate).toMatchObject({ action: "swap", fromSymbol: "HBAR", toSymbol: "SAUCE", amountUsd: 10 });
+    // HBAR is 35pp over its 45% ceiling and 46pp over target — move the ceiling excess (35%).
+    expect(candidate).toMatchObject({ action: "swap", fromSymbol: "HBAR", toSymbol: "SAUCE", amountUsd: 35 });
     expect(() => validateAllocationBands([{ symbol: "HBAR", minPct: 0, targetPct: 99, maxPct: 100 }])).toThrow("total 100%");
+  });
+
+  it("revalues live Mirror balances from the latest paid price snapshot after a swap", () => {
+    const before = valuePortfolio({
+      accountId: "0.0.1",
+      fetchedAt: "2026-07-31T12:00:00.000Z",
+      provenance: "live",
+      hbarBalance: 100_00000000n,
+      hbarFormatted: 100,
+      tokens: [],
+      allocations: [
+        { symbol: "HBAR", balanceFormatted: 100, usdValue: 0, allocationPct: 0 },
+        { symbol: "USDC", balanceFormatted: 20, usdValue: 0, allocationPct: 0 },
+        { symbol: "SAUCE", balanceFormatted: 0, usdValue: 0, allocationPct: 0 },
+      ],
+    }, { HBAR: 0.2, USDC: 1, SAUCE: 0.01 });
+    const prices = pricesUsdFromPortfolio(before);
+    expect(prices.HBAR).toBeCloseTo(0.2);
+    expect(prices.SAUCE).toBeCloseTo(0.01);
+    const liveAfterSwap = {
+      ...before,
+      hbarFormatted: 90,
+      allocations: [
+        { symbol: "HBAR", balanceFormatted: 90, usdValue: 0, allocationPct: 0 },
+        { symbol: "USDC", balanceFormatted: 20, usdValue: 0, allocationPct: 0 },
+        { symbol: "SAUCE", balanceFormatted: 1000, usdValue: 0, allocationPct: 0 },
+      ],
+    };
+    const merged = mergeLivePortfolioValuation(liveAfterSwap, before);
+    expect(merged.valued).toBe(true);
+    expect(merged.totalUsd).toBeCloseTo(90 * 0.2 + 20 + 1000 * 0.01);
+    const sauce = merged.assets.find((asset) => asset.symbol === "SAUCE");
+    expect(sauce?.balance).toBe(1000);
+    expect(sauce?.allocationPct).toBeGreaterThan(0);
+  });
+
+  it("still rotates an over-ceiling sleeve when nothing is under its hard floor", () => {
+    const candidate = proposeBandRebalance([
+      { symbol: "HBAR", balanceFormatted: 55, usdValue: 55, allocationPct: 55 },
+      { symbol: "USDC", balanceFormatted: 35, usdValue: 35, allocationPct: 35 },
+      { symbol: "SAUCE", balanceFormatted: 10, usdValue: 10, allocationPct: 10 },
+    ], [
+      { symbol: "HBAR", minPct: 25, targetPct: 34, maxPct: 45 },
+      { symbol: "USDC", minPct: 25, targetPct: 33, maxPct: 45 },
+      { symbol: "SAUCE", minPct: 10, targetPct: 33, maxPct: 40 },
+    ]);
+    expect(candidate.action).toBe("swap");
+    expect(candidate.fromSymbol).toBe("HBAR");
+    expect(candidate.toSymbol).toBe("SAUCE");
+    expect(candidate.amountUsd).toBeCloseTo(10); // 10pp ceiling excess
   });
 });
 

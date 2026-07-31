@@ -78,21 +78,44 @@ const fetchJson = async <T>(url: string, cacheTtlMs: number): Promise<T> => {
   throw lastError ?? new Error("CoinGecko request failed");
 };
 
-const fallback = (productId: string, symbol: string, date?: string): DataResult => ({
-  data: {
-    ...(generateData({
-      productId,
-      symbol,
-      date,
-      windowSeed: Math.floor(Date.now() / 1000 / MOCK_WINDOW_SEC),
-    }) as Record<string, unknown>),
-    currency: "USD",
-    source: "deterministic-fallback",
-    isLive: false,
-  },
-  asOf: new Date().toISOString(),
-  providerId: "market:fallback",
-});
+const fallback = (productId: string, symbol: string, date?: string): DataResult => {
+  const generated = generateData({
+    productId,
+    symbol,
+    date,
+    windowSeed: Math.floor(Date.now() / 1000 / MOCK_WINDOW_SEC),
+  }) as Record<string, unknown>;
+  // Keep a usable mid price on quote fallbacks so the agent can still value sleeves
+  // (labeled non-live — trade policy will refuse to authorize on this provenance).
+  if (productId === "quote") {
+    const bid = typeof generated.bid === "number" ? generated.bid : undefined;
+    const ask = typeof generated.ask === "number" ? generated.ask : undefined;
+    const mid = bid !== undefined && ask !== undefined ? (bid + ask) / 2 : bid ?? ask;
+    return {
+      data: {
+        ...generated,
+        ...(mid !== undefined ? { price: mid } : {}),
+        change24hPercent: 0,
+        volume24hUsd: 0,
+        currency: "USD",
+        source: "deterministic-fallback",
+        isLive: false,
+      },
+      asOf: new Date().toISOString(),
+      providerId: "market:fallback",
+    };
+  }
+  return {
+    data: {
+      ...generated,
+      currency: "USD",
+      source: "deterministic-fallback",
+      isLive: false,
+    },
+    asOf: new Date().toISOString(),
+    providerId: "market:fallback",
+  };
+};
 
 export class MarketDataProvider implements DataProvider {
   readonly id = "market";
@@ -148,6 +171,21 @@ export class MarketDataProvider implements DataProvider {
       const quote = payload[coinId];
       if (!quote || typeof quote.usd !== "number") throw new Error("CoinGecko returned no price");
 
+      // Attach a short CoinGecko OHLC sparkline so the workspace graph has a real
+      // series from the same paid read — not just a single spot sample.
+      let history: Array<{ t: number; price: number }> = [];
+      try {
+        const candles = await fetchJson<[number, number, number, number, number][]>(
+          `https://api.coingecko.com/api/v3/coins/${coinId}/ohlc?vs_currency=usd&days=1`,
+          5 * 60_000,
+        );
+        history = candles
+          .filter((candle) => Array.isArray(candle) && typeof candle[0] === "number" && typeof candle[4] === "number")
+          .map(([timestamp, , , , close]) => ({ t: timestamp, price: close }));
+      } catch {
+        history = [];
+      }
+
       const common = {
         currency: "USD",
         source: "CoinGecko",
@@ -155,6 +193,7 @@ export class MarketDataProvider implements DataProvider {
         lastUpdatedAt: quote.last_updated_at
           ? new Date(quote.last_updated_at * 1000).toISOString()
           : undefined,
+        ...(history.length > 0 ? { history } : {}),
       };
       const data = productId === "spot-price"
         ? { price: quote.usd, ...common }

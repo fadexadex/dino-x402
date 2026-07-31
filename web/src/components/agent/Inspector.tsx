@@ -17,6 +17,7 @@ export function Inspector({
   onFocus,
   onClose,
   spend,
+  weights = [],
 }: {
   view: InspectorView;
   ticks: Tick[];
@@ -28,6 +29,7 @@ export function Inspector({
   onFocus?: (id: string) => void;
   onClose: () => void;
   spend?: Spend;
+  weights?: Array<{ t: number; weight: number }>;
 }) {
   const focused = events.find((e) => e.id === focusId) ?? null;
   const tabs: { id: InspectorView; label: string }[] = [
@@ -44,10 +46,15 @@ export function Inspector({
     [events],
   );
 
-  const graphEvents = useMemo(
-    () => events.filter((e) => e.purchase || e.proposal || e.settlement || e.step === "verify"),
-    [events],
-  );
+  const graphEvents = useMemo(() => {
+    const fromEvents = events.filter((e) => e.purchase || e.proposal || e.settlement || e.step === "verify" || e.step === "acquire" || e.step === "propose");
+    if (fromEvents.length > 0) return fromEvents;
+    // Fall back to chart markers so the list stays useful after cache-hit runs.
+    return markers.map((m) => {
+      const match = events.find((e) => e.id === m.eventId);
+      return match ?? { id: m.eventId, step: "record" as const, at: m.t, title: "Marked on chart" };
+    });
+  }, [events, markers]);
 
   return (
     <aside
@@ -88,6 +95,7 @@ export function Inspector({
                 focusT={focused?.at ?? null}
                 tall={tall}
                 onMarker={(id) => onFocus?.(id)}
+                weights={weights}
               />
             </div>
 

@@ -64,6 +64,8 @@ export type AgentEvent = {
   at: number;
   title: string;
   detail?: string;
+  kind?: string;
+  bullets?: string[];
   rows?: { primary: string; secondary?: string; mono?: boolean }[];
   purchase?: Purchase;
   proposal?: Proposal;

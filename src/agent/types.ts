@@ -11,10 +11,16 @@ export type AgentEventKind =
   | "payment.settled"
   | "data.received"
   | "analysis.completed"
+  | "agent.thinking"
+  | "user.message"
+  | "run.triggered"
+  | "run.completed"
   | "run.failed"
   | "portfolio.read"
+  | "portfolio.updated"
   | "trade.proposed"
   | "trade.approved"
+  | "trade.submitted"
   | "trade.executed"
   | "trade.verified"
   | "trade.skipped";
@@ -39,6 +45,8 @@ export interface AgentRunInput {
   symbol?: string;
   budgetAtomic?: string | number;
   portfolio?: PortfolioHolding[];
+  /** Prefer a richer catalog product (e.g. quote) when it fits the spend cap. */
+  preferredProductId?: string;
 }
 
 export interface PurchasePlan {

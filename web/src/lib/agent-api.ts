@@ -95,7 +95,11 @@ export type DashboardSnapshot = {
   proposals?: Proposal[];
   spend?: DashboardSpend;
   system?: { halted?: boolean };
-  graph?: { ticks?: Array<{ t: number; price: number; provenance: Provenance }>; markers?: Array<{ t: number; eventId: string }> };
+  graph?: {
+    ticks?: Array<{ t: number; price: number; provenance: Provenance }>;
+    markers?: Array<{ t: number; eventId: string }>;
+    weights?: Array<{ t: number; weight: number }>;
+  };
   mandate?: PortfolioMandate | null;
   schedule?: { cadenceMinutes?: number; paused?: boolean; nextRunAt?: string; lastRunAt?: string; autonomyMode?: 1 | 2 | 3 | 4 };
   runs?: DashboardRun[];
@@ -147,7 +151,7 @@ export const api = {
       contractId: string;
       encodedParameters: string;
       amountTinybar: string;
-      quote: { fromSymbol: string; toSymbol: string; fromToken: string; toToken: string };
+      quote: { fromSymbol: string; toSymbol: string; fromToken: string; toToken: string; amountIn?: string };
     };
   }>(`/proposals/${proposalId}/approve`, { method: "POST" }),
   confirmProposal: (proposalId: string, transactionId: string) => request(`/proposals/${proposalId}/confirm`, { method: "POST", body: JSON.stringify({ transactionId }) }),
