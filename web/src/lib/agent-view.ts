@@ -13,7 +13,7 @@ export function toHoldings(portfolio?: PortfolioSnapshot): Holding[] {
 }
 
 const USER_FACING_KIND =
-  /^(portfolio\.|payment\.|data\.|analysis\.|agent\.|user\.|trade\.|run\.(completed|failed|no_action|triggered)|system\.(halted|resumed))/;
+  /^(portfolio\.|payment\.|data\.|analysis\.|agent\.thinking|user\.message|trade\.|run\.(completed|failed|no_action|triggered)|system\.(halted|resumed))/;
 
 export function isUserFacingKind(kind: string): boolean {
   return USER_FACING_KIND.test(kind);

@@ -114,11 +114,11 @@ export class MultiAssetAgentRunner {
       const rawPortfolio = await readPortfolio(accountId);
       record.portfolioBefore = rawPortfolio; store.updateRun(runId, { portfolioBefore: rawPortfolio }, profileId);
       const mode = state.profiles?.find((profile) => profile.id === profileId)?.autonomyMode ?? 3;
-      const hbarPct = rawPortfolio.allocations.find((a) => a.symbol.toUpperCase() === "HBAR")?.allocationPct;
+      const hbarBal = rawPortfolio.allocations.find((a) => a.symbol.toUpperCase() === "HBAR")?.balanceFormatted;
       think(
-        hbarPct === undefined
+        hbarBal === undefined
           ? "Mirror Node returned the live holdings. Next I need paid intelligence for HBAR, USDC, and SAUCE before judging the bands."
-          : `Holdings are in — HBAR is about ${hbarPct.toFixed(1)}% of the book. I still need fresh paid prices before any rebalance call.`,
+          : `Holdings are in — ${hbarBal.toFixed(4)} HBAR on the book, plus any HTS balances. I still need fresh paid prices before any rebalance call.`,
       );
       if (mode === 1) {
         record.recommendation = { summary: "Observe-only mode recorded the live portfolio without purchasing intelligence or proposing a trade.", action: "watch", confidence: 1, rationale: ["Autonomy mode 1"], source: "deterministic" };

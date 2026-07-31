@@ -46,10 +46,15 @@ export function Inspector({
     [events],
   );
 
-  const graphEvents = useMemo(
-    () => events.filter((e) => e.purchase || e.proposal || e.settlement || e.step === "verify"),
-    [events],
-  );
+  const graphEvents = useMemo(() => {
+    const fromEvents = events.filter((e) => e.purchase || e.proposal || e.settlement || e.step === "verify" || e.step === "acquire" || e.step === "propose");
+    if (fromEvents.length > 0) return fromEvents;
+    // Fall back to chart markers so the list stays useful after cache-hit runs.
+    return markers.map((m) => {
+      const match = events.find((e) => e.id === m.eventId);
+      return match ?? { id: m.eventId, step: "record" as const, at: m.t, title: "Marked on chart" };
+    });
+  }, [events, markers]);
 
   return (
     <aside
