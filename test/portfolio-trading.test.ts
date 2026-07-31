@@ -26,7 +26,7 @@ describe("live portfolio and deterministic allocation", () => {
     expect(valued.totalUsdValue).toBeCloseTo(1.373);
   });
 
-  it("proposes only an oversized allocation toward an asset below its hard floor", () => {
+  it("proposes selling an oversized sleeve toward target while funding an under-floor asset", () => {
     const candidate = proposeBandRebalance([
       { symbol: "HBAR", balanceFormatted: 80, usdValue: 80, allocationPct: 80 },
       { symbol: "USDC", balanceFormatted: 20, usdValue: 20, allocationPct: 20 },
@@ -36,8 +36,25 @@ describe("live portfolio and deterministic allocation", () => {
       { symbol: "USDC", minPct: 25, targetPct: 33, maxPct: 45 },
       { symbol: "SAUCE", minPct: 10, targetPct: 33, maxPct: 40 },
     ]);
-    expect(candidate).toMatchObject({ action: "swap", fromSymbol: "HBAR", toSymbol: "SAUCE", amountUsd: 10 });
+    // HBAR is 35pp over its 45% ceiling and 46pp over target — move the ceiling excess (35%).
+    expect(candidate).toMatchObject({ action: "swap", fromSymbol: "HBAR", toSymbol: "SAUCE", amountUsd: 35 });
     expect(() => validateAllocationBands([{ symbol: "HBAR", minPct: 0, targetPct: 99, maxPct: 100 }])).toThrow("total 100%");
+  });
+
+  it("still rotates an over-ceiling sleeve when nothing is under its hard floor", () => {
+    const candidate = proposeBandRebalance([
+      { symbol: "HBAR", balanceFormatted: 55, usdValue: 55, allocationPct: 55 },
+      { symbol: "USDC", balanceFormatted: 35, usdValue: 35, allocationPct: 35 },
+      { symbol: "SAUCE", balanceFormatted: 10, usdValue: 10, allocationPct: 10 },
+    ], [
+      { symbol: "HBAR", minPct: 25, targetPct: 34, maxPct: 45 },
+      { symbol: "USDC", minPct: 25, targetPct: 33, maxPct: 45 },
+      { symbol: "SAUCE", minPct: 10, targetPct: 33, maxPct: 40 },
+    ]);
+    expect(candidate.action).toBe("swap");
+    expect(candidate.fromSymbol).toBe("HBAR");
+    expect(candidate.toSymbol).toBe("SAUCE");
+    expect(candidate.amountUsd).toBeCloseTo(10); // 10pp ceiling excess
   });
 });
 

@@ -15,8 +15,10 @@ import {
   quoteSaucerExactInput, resolveAccountEvmAddress,
 } from "../trading/saucerswap.js";
 import { executeSaucerSwap } from "../trading/executor.js";
+import { insightFromPaidData, portfolioInsightNarrative, type MarketInsight } from "./insights.js";
 
 const ASSETS = ["HBAR", "USDC", "SAUCE"] as const;
+const MIN_TRADE_USD = 0.5;
 const DEFAULT_BANDS = [
   { symbol: "HBAR" as const, minPct: 25, targetPct: 34, maxPct: 45 },
   { symbol: "USDC" as const, minPct: 25, targetPct: 33, maxPct: 45 },
@@ -27,7 +29,10 @@ function paidSignal(data: unknown): { price?: number; provenance: "live" | "fall
   if (!data || typeof data !== "object") return undefined;
   const outer = data as Record<string, unknown>;
   const inner = outer.data && typeof outer.data === "object" ? outer.data as Record<string, unknown> : outer;
-  const value = inner.price ?? inner.close;
+  const bid = typeof inner.bid === "number" ? inner.bid : undefined;
+  const ask = typeof inner.ask === "number" ? inner.ask : undefined;
+  const mid = bid !== undefined && ask !== undefined ? (bid + ask) / 2 : undefined;
+  const value = inner.price ?? inner.close ?? inner.usd ?? mid ?? bid ?? ask;
   const fallback = inner.isLive === false || String(outer.providerId ?? "").includes("fallback") || String(inner.source ?? "").includes("fallback");
   return { price: typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined, provenance: fallback ? "fallback" : "live" };
 }
@@ -64,7 +69,7 @@ export class MultiAssetAgentRunner {
       maxTradePct: 5, maxPortfolioMovePct: 5, maxPriceImpactBps: 200, maxTradesPerDay: 6, maxDailyTradePct: 15,
       // Testnet HBAR can trade below $0.10; a 10 HBAR hard cap must still be able
       // to form a small approval-gated validation order.
-      minTradeUsd: 0.5,
+      minTradeUsd: MIN_TRADE_USD,
       allowedSymbols: ["HBAR", "USDC", "SAUCE"],
     });
   }
@@ -72,9 +77,18 @@ export class MultiAssetAgentRunner {
   async runMultiAsset(inputAccount?: string, input: { objective?: string; idempotencyKey?: string; profileId?: string } = {}): Promise<AgentMultiRunRecord> {
     const runId = randomUUID();
     const state = store.getState();
-    const accountId = inputAccount ?? state.account?.accountId ?? state.profiles?.find((profile) => profile.kind === "agent_managed")?.accountId;
+    // Prefer the active agent treasury / requested profile — never a stale paused wallet.
+    const activeAgent = state.profiles?.find((profile) => profile.kind === "agent_managed" && profile.status === "active");
+    const activeWallet = state.profiles?.find((profile) => profile.id === "connected-wallet" && profile.status === "active");
+    const accountId = inputAccount
+      ?? (input.profileId ? state.profiles?.find((profile) => profile.id === input.profileId)?.accountId : undefined)
+      ?? activeAgent?.accountId
+      ?? activeWallet?.accountId
+      ?? state.account?.accountId
+      ?? state.profiles?.find((profile) => profile.kind === "agent_managed")?.accountId;
     if (!accountId) throw new Error("A real Hedera account must be connected before running the agent");
     const profileId = input.profileId
+      ?? state.profiles?.find((profile) => profile.accountId === accountId && profile.status === "active")?.id
       ?? state.profiles?.find((profile) => profile.id === "connected-wallet" && profile.accountId === accountId)?.id
       ?? state.profiles?.find((profile) => profile.accountId === accountId)?.id;
     const events: AgentEvent[] = [];
@@ -145,28 +159,32 @@ export class MultiAssetAgentRunner {
         return record;
       }
       const prices: Record<string, number> = {};
+      const insights: MarketInsight[] = [];
       const selected = ASSETS.filter((symbol) => state.schedule.watchedSymbols.length === 0 || state.schedule.watchedSymbols.includes(symbol));
       if (selected.length !== ASSETS.length) throw new Error("HBAR, USDC, and SAUCE must all have live intelligence before allocation decisions");
       let spend = 0n;
       const cycleBudget = BigInt(Math.floor(state.schedule.dataBudgetHbar * 1e8));
       const dailyBudget = BigInt(Math.floor(state.schedule.dailyBudgetCapHbar * 1e8));
       const alreadySpentToday = BigInt(Math.floor(state.spending.todayDataHbar * 1e8));
+      think("I'll buy CoinGecko quote intelligence for each sleeve (price, 24h change, volume) so the decision is backed by market tape, not just a bare spot.");
       for (const symbol of selected) {
         const cached = this.signalCache.get(symbol);
         if (cached && Date.now() - cached.at < 60_000) {
           prices[symbol] = cached.price;
-          think(`${symbol} still has a paid CoinGecko signal inside its freshness window — reusing $${cached.price} instead of spending again.`);
+          think(`${symbol} still has a paid CoinGecko signal inside its freshness window — reusing it instead of spending again.`);
           event("data.received", `${symbol} intelligence reused`, `Reused paid CoinGecko signal at $${cached.price}.`, { provenance: "cached", price: cached.price, symbol });
-          // Keep a chartable observation so cache-hit runs still move the graph.
           if (cached.data) {
             record.dataPurchases.push({
               symbol,
-              productId: cached.productId ?? "spot-price",
+              productId: cached.productId ?? "quote",
               amountHbar: 0,
               transactionId: `cache:${runId}:${symbol}`,
               hashscanUrl: cached.hashscanUrl ?? "",
               data: cached.data,
             });
+            const insight = insightFromPaidData(symbol, cached.data);
+            insights.push(insight);
+            for (const sentence of insight.sentences) think(sentence);
           }
           continue;
         }
@@ -174,19 +192,43 @@ export class MultiAssetAgentRunner {
         const remainingDaily = dailyBudget - alreadySpentToday - spend;
         const remaining = remainingCycle < remainingDaily ? remainingCycle : remainingDaily;
         if (remaining <= 0n) throw new Error("x402 data budget exhausted before all required asset signals were acquired");
-        think(`Buying a live ${symbol} CoinGecko signal through x402 so the valuation stays on-chain and independently verifiable.`);
+        think(`Requesting a paid CoinGecko quote for ${symbol} — I want the live price plus 24h change/volume before judging this sleeve.`);
         event("payment.required", `Buying ${symbol} intelligence`, "Requesting a real x402 quote for CoinGecko market data.");
-        const result = await this.intelligence.run({ symbol, objective: record.objective, portfolio: [], budgetAtomic: remaining.toString() });
+        // Brief pause between paid reads so CoinGecko rate limits are less likely mid-cycle.
+        if (insights.length > 0) await new Promise((resolve) => setTimeout(resolve, 400));
+        let result = await this.intelligence.run({
+          symbol,
+          objective: record.objective,
+          portfolio: [],
+          budgetAtomic: remaining.toString(),
+          preferredProductId: "quote",
+        });
         if (result.status !== "completed" || !result.purchase) throw new Error(`Unable to obtain verified paid intelligence for ${symbol}: ${result.error ?? "unknown error"}`);
-        if (result.plan?.reason) {
-          think(result.plan.reason);
-        }
+        if (result.plan?.reason) think(result.plan.reason);
         for (const nested of result.events) {
           if (nested.kind === "payment.authorized" || nested.kind === "payment.settled") {
             think(nested.detail || nested.title);
           }
         }
-        const signal = paidSignal(result.purchase.data);
+        let signal = paidSignal(result.purchase.data);
+        // If the quote payload was unusable (e.g. rate-limit fallback without price), retry spot.
+        if (!signal?.price) {
+          think(`${symbol} quote payload had no usable price — retrying with a paid CoinGecko spot read.`);
+          const retryBudget = remaining - BigInt(result.purchase.amountAtomic);
+          if (retryBudget <= 0n) throw new Error(`Paid intelligence for ${symbol} lacked a usable price`);
+          spend += BigInt(result.purchase.amountAtomic);
+          store.recordSpend(Number(BigInt(result.purchase.amountAtomic)) / 1e8, 0, profileId);
+          record.dataPurchases.push({ symbol, productId: result.purchase.productId, amountHbar: Number(BigInt(result.purchase.amountAtomic)) / 1e8, transactionId: result.purchase.transactionId, hashscanUrl: result.purchase.hashscanUrl, data: result.purchase.data });
+          result = await this.intelligence.run({
+            symbol,
+            objective: record.objective,
+            portfolio: [],
+            budgetAtomic: retryBudget.toString(),
+            preferredProductId: "spot-price",
+          });
+          if (result.status !== "completed" || !result.purchase) throw new Error(`Unable to obtain verified paid intelligence for ${symbol}: ${result.error ?? "unknown error"}`);
+          signal = paidSignal(result.purchase.data);
+        }
         if (!signal?.price) throw new Error(`Paid intelligence for ${symbol} lacked a usable price`);
         prices[symbol] = signal.price; spend += BigInt(result.purchase.amountAtomic);
         this.signalCache.set(symbol, {
@@ -202,7 +244,9 @@ export class MultiAssetAgentRunner {
         record.dataPurchases.push({ symbol, productId: result.purchase.productId, amountHbar, transactionId: result.purchase.transactionId, hashscanUrl: result.purchase.hashscanUrl, data: result.purchase.data });
         store.recordSpend(amountHbar, 0, profileId);
         event("payment.settled", `${symbol} payment verified`, `CoinGecko ${symbol} @ $${signal.price} · x402 receipt ${result.purchase.transactionId}`, { transactionId: result.purchase.transactionId, hashscanUrl: result.purchase.hashscanUrl, provenance: signal.provenance, price: signal.price, symbol });
-        think(`${symbol} settled at $${signal.price} from CoinGecko (${signal.provenance}). Receipt ${result.purchase.transactionId} is on HashScan.`);
+        const insight = insightFromPaidData(symbol, result.purchase.data);
+        insights.push(insight);
+        for (const sentence of insight.sentences) think(sentence);
       }
       record.spentDataHbar = Number(spend) / 1e8;
       const managedAllocations = ASSETS.map((symbol) => rawPortfolio.allocations.find((allocation) => allocation.symbol.toUpperCase() === symbol) ?? {
@@ -214,17 +258,29 @@ export class MultiAssetAgentRunner {
       });
       const portfolio = valuePortfolio({ ...rawPortfolio, allocations: managedAllocations }, prices);
       record.portfolioBefore = portfolio; store.updateRun(runId, { portfolioBefore: portfolio, dataPurchases: record.dataPurchases, spentDataHbar: record.spentDataHbar }, profileId);
-      think("All three paid prices are in. Comparing each sleeve against its allocation band next.");
+      think("All three paid CoinGecko reads are in. Comparing each sleeve against its allocation band next.");
       const candidate = proposeBandRebalance(portfolio.allocations, DEFAULT_BANDS);
-      const recommendation: AgentRecommendation = { summary: candidate.reason, action: candidate.action === "swap" ? "rebalance" : "watch", confidence: 1, rationale: ["Deterministic allocation-band evaluation", "All three values were paid x402 live signals", candidate.reason], source: "deterministic" };
+      const narrative = portfolioInsightNarrative({
+        insights,
+        allocations: portfolio.allocations,
+        bands: DEFAULT_BANDS,
+        candidate,
+      });
+      for (const line of narrative) think(line);
+      const recommendation: AgentRecommendation = {
+        summary: candidate.reason,
+        action: candidate.action === "swap" ? "rebalance" : "watch",
+        confidence: 1,
+        rationale: narrative.slice(0, 4),
+        source: "deterministic",
+      };
       record.recommendation = recommendation;
-      for (const line of recommendation.rationale) think(line);
-      event("analysis.completed", "Deterministic portfolio evaluation", recommendation.summary, { recommendation });
+      event("analysis.completed", "Market-backed portfolio evaluation", recommendation.summary, { recommendation, insights });
       if (mode === 2) {
         think("Mode 2 stops at advice — recording the recommendation without proposing an executable order.");
         record.status = "completed"; record.completedAt = new Date().toISOString();
         conclude(record, `Conclusion: ${recommendation.summary}`, [
-          `Paid/reused CoinGecko prices for ${Object.keys(prices).join(", ")}.`,
+          `Paid/reused CoinGecko quotes for ${Object.keys(prices).join(", ")}.`,
           `Portfolio marked at about $${(portfolio.totalUsdValue ?? 0).toFixed(2)}.`,
           "Advise-only mode — no order was proposed or submitted.",
         ]);
@@ -235,13 +291,46 @@ export class MultiAssetAgentRunner {
       if (candidate.action === "swap" && candidate.fromSymbol && candidate.toSymbol) {
         const source = portfolio.allocations.find((allocation) => allocation.symbol === candidate.fromSymbol);
         const configuredMaxPct = 5;
+        const maxAtomic = Number(BigInt(this.config.tradeMaxAmountTinybar ?? "1000000000")) / 1e8;
         const hbarAtomicCapPct = candidate.fromSymbol === "HBAR" && source?.balanceFormatted
-          ? Number(BigInt(this.config.tradeMaxAmountTinybar ?? "1000000000")) / 1e8 / source.balanceFormatted * 100
+          ? maxAtomic / source.balanceFormatted * 100
           : configuredMaxPct;
-        const executablePct = Math.min(candidate.percentage, configuredMaxPct, hbarAtomicCapPct);
-        const proposal: TradeProposal = { action: "swap", fromSymbol: candidate.fromSymbol, toSymbol: candidate.toSymbol, percentage: executablePct, amountFormatted: source ? source.balanceFormatted * executablePct / 100 : 0, reasoning: `${candidate.reason} The executable tranche is capped by portfolio policy.`, confidence: 1, source: "deterministic" };
+        let executablePct = Math.min(candidate.percentage, configuredMaxPct, hbarAtomicCapPct);
+        let amountFormatted = source ? source.balanceFormatted * executablePct / 100 : 0;
+        let amountUsd = (source?.usdValue ?? 0) * executablePct / 100;
+        // If band math undershoots the policy minimum, size up to minTradeUsd (still capped).
+        if (source && amountUsd > 0 && amountUsd < MIN_TRADE_USD) {
+          const price = prices[candidate.fromSymbol] ?? (source.usdValue / Math.max(source.balanceFormatted, 1e-12));
+          const minAmount = MIN_TRADE_USD / Math.max(price, 1e-12);
+          const maxAmount = Math.min(
+            source.balanceFormatted * configuredMaxPct / 100,
+            candidate.fromSymbol === "HBAR" ? maxAtomic : source.balanceFormatted,
+            source.balanceFormatted,
+          );
+          amountFormatted = Math.min(Math.max(amountFormatted, minAmount), maxAmount);
+          executablePct = source.balanceFormatted > 0 ? amountFormatted / source.balanceFormatted * 100 : executablePct;
+          amountUsd = amountFormatted * price;
+          think(`The raw band move was below the $${MIN_TRADE_USD} minimum, so I sized the order up to about $${amountUsd.toFixed(2)} while staying inside the 5% / atomic caps.`);
+        }
+        const fromInsight = insights.find((item) => item.symbol === candidate.fromSymbol);
+        const toInsight = insights.find((item) => item.symbol === candidate.toSymbol);
+        const proposal: TradeProposal = {
+          action: "swap",
+          fromSymbol: candidate.fromSymbol,
+          toSymbol: candidate.toSymbol,
+          percentage: executablePct,
+          amountFormatted,
+          reasoning: [
+            candidate.reason,
+            fromInsight?.change24hPercent !== undefined ? `${candidate.fromSymbol} 24h ${fromInsight.change24hPercent.toFixed(2)}% on CoinGecko.` : undefined,
+            toInsight?.change24hPercent !== undefined ? `${candidate.toSymbol} 24h ${toInsight.change24hPercent.toFixed(2)}% on CoinGecko.` : undefined,
+            "Executable tranche is capped by portfolio policy.",
+          ].filter(Boolean).join(" "),
+          confidence: 1,
+          source: "deterministic",
+        };
         record.tradeProposals = [proposal];
-        think(proposal.reasoning);
+        think(`I want to sell ${amountFormatted.toFixed(4)} ${candidate.fromSymbol} (~$${amountUsd.toFixed(2)}) into ${candidate.toSymbol}. ${proposal.reasoning}`);
         const fromToken = candidate.fromSymbol === "HBAR" ? undefined : rawPortfolio.tokens.find((token) => token.symbol.toUpperCase() === candidate.fromSymbol);
         const toToken = candidate.toSymbol === "HBAR" ? undefined : rawPortfolio.tokens.find((token) => token.symbol.toUpperCase() === candidate.toSymbol);
         const fromDecimals = candidate.fromSymbol === "HBAR" ? 8 : fromToken?.decimals;
@@ -249,7 +338,7 @@ export class MultiAssetAgentRunner {
         if (fromDecimals === undefined) throw new Error(`Cannot quote ${candidate.fromSymbol}: token decimals are unavailable`);
         const amountIn = BigInt(Math.floor(proposal.amountFormatted * 10 ** fromDecimals));
         const dexConfig = saucerConfig(this.config);
-        think(`Asking SaucerSwap QuoterV2 for an executable ${candidate.fromSymbol} → ${candidate.toSymbol} route.`);
+        think(`Asking SaucerSwap QuoterV2 for an executable ${candidate.fromSymbol} → ${candidate.toSymbol} route at this size.`);
         const quote = await quoteSaucerExactInput({
           fromSymbol: candidate.fromSymbol, toSymbol: candidate.toSymbol, amountIn,
           amountInFormatted: proposal.amountFormatted, expectedAmountOutFormatted: 0,
@@ -259,9 +348,8 @@ export class MultiAssetAgentRunner {
         quote.expectedAmountOutFormatted = Number(quote.expectedAmountOut) / 10 ** toDecimals;
         quote.amountOutMinimum = quote.expectedAmountOut * BigInt(10_000 - Number(this.config.tradeSlippageBps ?? "100")) / 10_000n;
         const provenance = Array.from(this.signalCache.values()).some((signal) => signal.provenance === "fallback") ? "fallback" : "live";
-        const amountUsd = (source?.usdValue ?? 0) * executablePct / 100;
         const policy = this.tradePolicy.validate(proposal, { availableBalance: source?.balanceFormatted ?? 0, portfolioUsd: portfolio.totalUsdValue ?? 0, amountUsd, provenance, halted: store.isHalted(), quote });
-        event(policy.approved ? "trade.proposed" : "trade.skipped", policy.approved ? "Trade proposed" : "Trade blocked", policy.reason, { proposal });
+        event(policy.approved ? "trade.proposed" : "trade.skipped", policy.approved ? "Trade proposed" : "Trade blocked", policy.reason, { proposal, amountUsd });
         if (policy.approved) {
           const builtTransaction = buildExactInputTransaction({
             quote,
@@ -271,23 +359,23 @@ export class MultiAssetAgentRunner {
           const canExecuteAutonomously = state.schedule.autonomousTrading && accountId === this.config.agentPayerId && Boolean(this.config.agentPayerKey);
           if (canExecuteAutonomously) {
             event("trade.approved", "Trade passed autonomous policy", "Submitting the verified SaucerSwap V2 call.", { quote, presentInUi: true });
-            think("Policy cleared the order. Submitting the SaucerSwap V2 call from the agent treasury and waiting for Hedera consensus.");
+            think("Policy cleared the order — CoinGecko tape + band math + live quote all agree. Submitting from the agent treasury.");
             event("trade.submitted", "Trade submitted", "Awaiting Hedera consensus for the SaucerSwap call.", { quote });
             const result = await executeSaucerSwap({ payerId: accountId, payerKey: this.config.agentPayerKey!, quote, transaction: builtTransaction, mirrorBaseUrl: this.config.mirrorNodeBaseUrl });
             record.tradeExecutions.push(result);
             store.recordSpend(0, proposal.amountFormatted, profileId);
             event("trade.verified", "Trade verified on Hedera", `${proposal.amountFormatted} ${proposal.fromSymbol} → ${quote.expectedAmountOutFormatted} ${proposal.toSymbol}`, { result, transactionId: result.transactionId });
-            think(`Swap verified: ${proposal.amountFormatted} ${proposal.fromSymbol} → ${quote.expectedAmountOutFormatted} ${proposal.toSymbol}.`);
+            think(`Swap verified on Hedera: ${proposal.amountFormatted.toFixed(4)} ${proposal.fromSymbol} → ${quote.expectedAmountOutFormatted} ${proposal.toSymbol}.`);
           } else {
             think("I prepared an executable quote and paused for approval — nothing moves until you confirm.");
             const pending: PendingTrade = { id: randomUUID(), runId, accountId, proposal, quote, builtTransaction, createdAt: new Date().toISOString(), status: "pending" };
             store.addPendingTrade(pending, profileId); record.pendingTradeIds.push(pending.id); record.status = "waiting_approval";
           }
         } else {
-          think(policy.reason);
+          think(`Policy blocked the sale: ${policy.reason}`);
         }
       } else {
-        think("Bands look healthy — no rebalance candidate this cycle.");
+        think("Bands look healthy after the paid reads — no rebalance candidate this cycle.");
       }
       if (record.status !== "waiting_approval") record.status = "completed";
       record.completedAt = new Date().toISOString();

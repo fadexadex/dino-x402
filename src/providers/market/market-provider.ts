@@ -78,21 +78,44 @@ const fetchJson = async <T>(url: string, cacheTtlMs: number): Promise<T> => {
   throw lastError ?? new Error("CoinGecko request failed");
 };
 
-const fallback = (productId: string, symbol: string, date?: string): DataResult => ({
-  data: {
-    ...(generateData({
-      productId,
-      symbol,
-      date,
-      windowSeed: Math.floor(Date.now() / 1000 / MOCK_WINDOW_SEC),
-    }) as Record<string, unknown>),
-    currency: "USD",
-    source: "deterministic-fallback",
-    isLive: false,
-  },
-  asOf: new Date().toISOString(),
-  providerId: "market:fallback",
-});
+const fallback = (productId: string, symbol: string, date?: string): DataResult => {
+  const generated = generateData({
+    productId,
+    symbol,
+    date,
+    windowSeed: Math.floor(Date.now() / 1000 / MOCK_WINDOW_SEC),
+  }) as Record<string, unknown>;
+  // Keep a usable mid price on quote fallbacks so the agent can still value sleeves
+  // (labeled non-live — trade policy will refuse to authorize on this provenance).
+  if (productId === "quote") {
+    const bid = typeof generated.bid === "number" ? generated.bid : undefined;
+    const ask = typeof generated.ask === "number" ? generated.ask : undefined;
+    const mid = bid !== undefined && ask !== undefined ? (bid + ask) / 2 : bid ?? ask;
+    return {
+      data: {
+        ...generated,
+        ...(mid !== undefined ? { price: mid } : {}),
+        change24hPercent: 0,
+        volume24hUsd: 0,
+        currency: "USD",
+        source: "deterministic-fallback",
+        isLive: false,
+      },
+      asOf: new Date().toISOString(),
+      providerId: "market:fallback",
+    };
+  }
+  return {
+    data: {
+      ...generated,
+      currency: "USD",
+      source: "deterministic-fallback",
+      isLive: false,
+    },
+    asOf: new Date().toISOString(),
+    providerId: "market:fallback",
+  };
+};
 
 export class MarketDataProvider implements DataProvider {
   readonly id = "market";

@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 /**
  * Live sentence-by-sentence reasoning stream, adapted from samples/ThinkingReasoning.
- * Accepts real agent thoughts instead of a hardcoded demo script.
+ * New sentences fade/slide in one at a time; older lines stay put (no remount flicker).
  */
 export function ThinkingReasoning({
   sentences,
@@ -15,16 +15,14 @@ export function ThinkingReasoning({
 }) {
   const [open, setOpen] = useState(false);
   const [fade, setFade] = useState({ top: false, bottom: true });
+  const [visibleCount, setVisibleCount] = useState(0);
   const viewportRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
+  const seenRef = useRef(0);
 
   const done = !working;
   const expanded = done ? open : true;
-  const elapsedS = Math.max(
-    1,
-    Math.round(((done ? Date.now() : Date.now()) - (startedAt ?? Date.now())) / 1000),
-  );
-  // Freeze elapsed once done by using a stable snapshot from startedAt → now at first done paint.
+
   const [frozenElapsed, setFrozenElapsed] = useState<number | null>(null);
   useEffect(() => {
     if (done && frozenElapsed === null) {
@@ -33,19 +31,63 @@ export function ThinkingReasoning({
     if (!done && frozenElapsed !== null) setFrozenElapsed(null);
   }, [done, frozenElapsed, startedAt]);
 
-  const displayElapsed = frozenElapsed ?? elapsedS;
-  const MAX_H = 180;
-  const contentH = streamRef.current?.scrollHeight ?? Math.min(sentences.length * 44, MAX_H);
-  const [measuredH, setMeasuredH] = useState(0);
+  // Reveal newly arrived thoughts with a short stagger so motion stays soft.
   useEffect(() => {
-    setMeasuredH(streamRef.current?.scrollHeight ?? 0);
-  }, [sentences.length, expanded]);
+    if (sentences.length <= seenRef.current) {
+      setVisibleCount(sentences.length);
+      return;
+    }
+    let cancelled = false;
+    const reveal = () => {
+      if (cancelled) return;
+      setVisibleCount((count) => {
+        if (count >= sentences.length) return count;
+        return count + 1;
+      });
+    };
+    // Show anything already buffered immediately, then ease in the rest.
+    setVisibleCount((count) => Math.max(count, Math.min(sentences.length, seenRef.current || 1)));
+    const id = window.setInterval(() => {
+      setVisibleCount((count) => {
+        if (count >= sentences.length) {
+          window.clearInterval(id);
+          return count;
+        }
+        return count + 1;
+      });
+    }, 140);
+    reveal();
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [sentences.length]);
 
-  const height = measuredH || contentH;
+  useEffect(() => {
+    seenRef.current = Math.max(seenRef.current, visibleCount);
+  }, [visibleCount]);
+
+  useEffect(() => {
+    if (!working) {
+      setVisibleCount(sentences.length);
+      seenRef.current = sentences.length;
+    }
+  }, [working, sentences.length]);
+
+  const displayElapsed = frozenElapsed
+    ?? Math.max(1, Math.round((Date.now() - (startedAt ?? Date.now())) / 1000));
+  const MAX_H = 200;
+  const shown = sentences.slice(0, visibleCount);
+  const [measuredH, setMeasuredH] = useState(0);
+  useLayoutEffect(() => {
+    setMeasuredH(streamRef.current?.scrollHeight ?? 0);
+  }, [shown.length, expanded]);
+
+  const height = measuredH;
   const capped = height > MAX_H;
-  const viewH = capped ? MAX_H : height;
+  const viewH = capped ? MAX_H : Math.max(height, working ? 28 : 0);
   const scrollable = done && open;
-  const FADE = 16;
+  const FADE = 18;
   const translate = scrollable ? 0 : capped ? MAX_H - FADE - height : 0;
   const showTop = scrollable ? fade.top : capped;
   const showBottom = scrollable ? fade.bottom : capped;
@@ -54,10 +96,12 @@ export function ThinkingReasoning({
     : "none";
 
   useEffect(() => {
-    if (working && viewportRef.current) {
-      viewportRef.current.scrollTop = viewportRef.current.scrollHeight;
-    }
-  }, [sentences.length, working]);
+    if (!working || !viewportRef.current) return;
+    viewportRef.current.scrollTo({
+      top: viewportRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [visibleCount, working]);
 
   const onScroll = () => {
     const el = viewportRef.current;
@@ -71,10 +115,10 @@ export function ThinkingReasoning({
   if (sentences.length === 0 && !working) return null;
 
   return (
-    <div className="flex w-full flex-col" style={{ animation: "fade-in 320ms cubic-bezier(0.22,1,0.36,1) both" }}>
+    <div className="flex w-full flex-col" style={{ animation: "fade-in 280ms cubic-bezier(0.22,1,0.36,1) both" }}>
       <button
         type="button"
-        className={`inline-flex items-center gap-1.5 self-start ${done ? "cursor-pointer" : "cursor-default"}`}
+        className={`inline-flex items-center gap-1.5 self-start rounded-control px-0.5 ${done ? "cursor-pointer hover:bg-hover-2" : "cursor-default"}`}
         aria-expanded={expanded}
         aria-label="Toggle thought"
         onClick={done ? () => {
@@ -125,7 +169,7 @@ export function ThinkingReasoning({
       </button>
 
       <div
-        className="grid transition-[grid-template-rows,opacity] duration-300"
+        className="grid transition-[grid-template-rows,opacity] duration-400"
         style={{
           gridTemplateRows: expanded ? "1fr" : "0fr",
           opacity: expanded ? 1 : 0,
@@ -140,29 +184,35 @@ export function ThinkingReasoning({
               height: `${viewH}px`,
               WebkitMaskImage: mask,
               maskImage: mask,
-              transition: "height 360ms cubic-bezier(0.22,1,0.36,1)",
+              transition: "height 420ms cubic-bezier(0.22,1,0.36,1)",
             }}
             onScroll={scrollable ? onScroll : undefined}
           >
             <div
               ref={streamRef}
-              className="flex flex-col gap-1"
+              className="flex flex-col gap-1.5"
               style={{
                 transform: `translateY(${translate}px)`,
-                transition: "transform 560ms cubic-bezier(0.22,1,0.36,1)",
+                transition: "transform 520ms cubic-bezier(0.22,1,0.36,1)",
               }}
             >
-              {sentences.map((line, i) => (
+              {shown.map((line, i) => (
                 <p
-                  key={`${i}-${line.slice(0, 24)}`}
-                  className="m-0 text-[13px] leading-5 font-[425] tracking-[-0.005em] text-ink-2"
-                  style={{ animation: "fade-up 420ms cubic-bezier(0.22,1,0.36,1) both" }}
+                  key={`thought-${i}`}
+                  className="m-0 text-[13px] leading-[1.45] font-[425] tracking-[-0.005em] text-ink-2"
+                  style={{
+                    animation: i >= seenRef.current - 1
+                      ? "fade-up 480ms cubic-bezier(0.22,1,0.36,1) both"
+                      : undefined,
+                  }}
                 >
                   {line}
                 </p>
               ))}
-              {working && sentences.length === 0 && (
-                <p className="m-0 text-[13px] leading-5 text-ink-3">Gathering context…</p>
+              {working && shown.length === 0 && (
+                <p className="m-0 text-[13px] leading-5 text-ink-3" style={{ animation: "fade-in 300ms ease both" }}>
+                  Gathering CoinGecko context…
+                </p>
               )}
             </div>
           </div>

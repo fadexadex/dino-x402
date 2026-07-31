@@ -117,6 +117,7 @@ export class AgentRunner {
         portfolio,
         products: catalog.products,
         budgetAtomic: budgetAtomic.toString(),
+        preferredProductId: input.preferredProductId ?? "quote",
       });
       const product = catalog.products.find((item) => item.id === plan.productId) as DataProduct | undefined;
       if (!product) throw new Error("Purchase plan selected an unknown product");

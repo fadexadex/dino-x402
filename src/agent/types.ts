@@ -44,6 +44,8 @@ export interface AgentRunInput {
   symbol?: string;
   budgetAtomic?: string | number;
   portfolio?: PortfolioHolding[];
+  /** Prefer a richer catalog product (e.g. quote) when it fits the spend cap. */
+  preferredProductId?: string;
 }
 
 export interface PurchasePlan {

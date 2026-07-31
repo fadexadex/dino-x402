@@ -76,25 +76,33 @@ export class MistralAdvisor {
     portfolio: PortfolioHolding[];
     products: DataProduct[];
     budgetAtomic: string;
+    preferredProductId?: string;
   }): Promise<PurchasePlan> {
     const fallback = (): PurchasePlan => {
       const affordable = args.products
-        .filter((product) => BigInt(product.priceAtomic) <= BigInt(args.budgetAtomic))
-        .sort((a, b) => BigInt(a.priceAtomic) < BigInt(b.priceAtomic) ? -1 : 1)[0];
-      if (!affordable) throw new Error("No catalog product fits the spend cap");
+        .filter((product) => BigInt(product.priceAtomic) <= BigInt(args.budgetAtomic));
+      const preferred = args.preferredProductId
+        ? affordable.find((product) => product.id === args.preferredProductId)
+        : undefined;
+      // Prefer quote (24h change + volume) when affordable so thoughts can cite market tape.
+      const quote = affordable.find((product) => product.id === "quote");
+      const selected = preferred ?? quote ?? affordable.sort((a, b) => BigInt(a.priceAtomic) < BigInt(b.priceAtomic) ? -1 : 1)[0];
+      if (!selected) throw new Error("No catalog product fits the spend cap");
       const params: Record<string, string> = { symbol: args.requestedSymbol };
-      if (affordable.paramsSchema.date?.required) params.date = new Date().toISOString().slice(0, 10);
+      if (selected.paramsSchema.date?.required) params.date = new Date().toISOString().slice(0, 10);
       return {
-        productId: affordable.id,
+        productId: selected.id,
         params,
-        reason: `Buy the least expensive relevant signal for ${args.requestedSymbol}.`,
+        reason: selected.id === "quote"
+          ? `Buy the CoinGecko quote for ${args.requestedSymbol} so we get price, 24h change, and volume for the decision.`
+          : `Buy the best affordable CoinGecko signal for ${args.requestedSymbol}.`,
         source: "deterministic",
       };
     };
 
     try {
       const result = await this.complete(
-        "You are a cautious autonomous portfolio agent. Choose exactly one affordable catalog product. Return only JSON with productId, symbol, optional date, and reason. Never invent products or symbols.",
+        "You are a cautious autonomous portfolio agent. Prefer the quote product when affordable so the agent can cite 24h change and volume. Choose exactly one affordable catalog product. Return only JSON with productId, symbol, optional date, and reason. Never invent products or symbols.",
         JSON.stringify(args),
       );
       const productId = typeof result.productId === "string" ? result.productId : "";
