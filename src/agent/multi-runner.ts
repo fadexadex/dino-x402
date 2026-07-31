@@ -1,0 +1,211 @@
+import { randomUUID } from "node:crypto";
+import type { ServerConfig } from "../core/config.js";
+import type { DataProvider } from "../core/provider.js";
+import type { AgentEvent, AgentRecommendation } from "./types.js";
+import type { AgentMultiRunRecord, PendingTrade } from "../store/types.js";
+import type { SaucerSwapConfig, TradeProposal } from "../trading/types.js";
+import { readPortfolio } from "../portfolio/reader.js";
+import { proposeBandRebalance, valuePortfolio } from "../portfolio/allocation.js";
+import { TradePolicy } from "../trading/policy.js";
+import { AgentRunner } from "./runner.js";
+import { store } from "../store/index.js";
+import { sseBroadcaster } from "../server/stream.js";
+import {
+  DEFAULT_SAUCERSWAP_TESTNET, buildExactInputTransaction, createMirrorExactInputQuoter,
+  quoteSaucerExactInput, resolveAccountEvmAddress,
+} from "../trading/saucerswap.js";
+import { executeSaucerSwap } from "../trading/executor.js";
+
+const ASSETS = ["HBAR", "USDC", "SAUCE"] as const;
+const DEFAULT_BANDS = [
+  { symbol: "HBAR" as const, minPct: 25, targetPct: 34, maxPct: 45 },
+  { symbol: "USDC" as const, minPct: 25, targetPct: 33, maxPct: 45 },
+  { symbol: "SAUCE" as const, minPct: 10, targetPct: 33, maxPct: 40 },
+];
+
+function paidSignal(data: unknown): { price?: number; provenance: "live" | "fallback" } | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const outer = data as Record<string, unknown>;
+  const inner = outer.data && typeof outer.data === "object" ? outer.data as Record<string, unknown> : outer;
+  const value = inner.price ?? inner.close;
+  const fallback = inner.isLive === false || String(outer.providerId ?? "").includes("fallback") || String(inner.source ?? "").includes("fallback");
+  return { price: typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined, provenance: fallback ? "fallback" : "live" };
+}
+
+function saucerConfig(config: ServerConfig): SaucerSwapConfig {
+  return {
+    routerId: config.saucerRouterId ?? DEFAULT_SAUCERSWAP_TESTNET.routerId,
+    quoterId: config.saucerQuoterId ?? DEFAULT_SAUCERSWAP_TESTNET.quoterId,
+    whbarTokenId: config.saucerWhbarTokenId ?? DEFAULT_SAUCERSWAP_TESTNET.whbarTokenId,
+    tokenIds: {
+      HBAR: "0.0.0",
+      USDC: config.saucerUsdcTokenId ?? DEFAULT_SAUCERSWAP_TESTNET.tokenIds.USDC,
+      SAUCE: config.saucerSauceTokenId ?? DEFAULT_SAUCERSWAP_TESTNET.tokenIds.SAUCE,
+    },
+    feeTier: Number(config.saucerFeeTier ?? DEFAULT_SAUCERSWAP_TESTNET.feeTier),
+  };
+}
+
+/**
+ * Multi-asset orchestration buys real x402 intelligence through AgentRunner.  It
+ * deliberately produces proposals only: execution is delegated to the SaucerSwap
+ * signer boundary and never falls back to a plain transfer or demo transaction.
+ */
+export class MultiAssetAgentRunner {
+  private readonly tradePolicy: TradePolicy;
+  private readonly intelligence: AgentRunner;
+  private readonly signalCache = new Map<string, { price: number; at: number; provenance: "live" | "fallback" }>();
+
+  constructor(private readonly config: ServerConfig, _provider?: DataProvider) {
+    this.intelligence = new AgentRunner(config);
+    this.tradePolicy = new TradePolicy({
+      maxTradeAmountTinybar: BigInt(config.tradeMaxAmountTinybar ?? "1000000000"),
+      maxSlippageBps: Number(config.tradeSlippageBps ?? "500"),
+      maxTradePct: 5, maxPortfolioMovePct: 5, maxPriceImpactBps: 200, maxTradesPerDay: 6, maxDailyTradePct: 15,
+      // Testnet HBAR can trade below $0.10; a 10 HBAR hard cap must still be able
+      // to form a small approval-gated validation order.
+      minTradeUsd: 0.5,
+      allowedSymbols: ["HBAR", "USDC", "SAUCE"],
+    });
+  }
+
+  async runMultiAsset(inputAccount?: string, input: { objective?: string; idempotencyKey?: string; profileId?: string } = {}): Promise<AgentMultiRunRecord> {
+    const runId = randomUUID();
+    const state = store.getState();
+    const accountId = inputAccount ?? state.account?.accountId ?? state.profiles?.find((profile) => profile.kind === "agent_managed")?.accountId;
+    if (!accountId) throw new Error("A real Hedera account must be connected before running the agent");
+    const profileId = input.profileId
+      ?? state.profiles?.find((profile) => profile.id === "connected-wallet" && profile.accountId === accountId)?.id
+      ?? state.profiles?.find((profile) => profile.accountId === accountId)?.id;
+    const events: AgentEvent[] = [];
+    const event = (kind: AgentEvent["kind"], title: string, detail: string, metadata?: Record<string, unknown>) => {
+      const value: AgentEvent = { seq: events.length + 1, kind, at: new Date().toISOString(), title, detail, metadata };
+      events.push(value); sseBroadcaster.broadcast("agent.event", { runId, event: value }, { profileId, runId });
+    };
+    const objective = input.objective?.trim().slice(0, 600) || "Autonomous multi-asset portfolio monitoring and rebalancing";
+    const record: AgentMultiRunRecord = {
+      id: runId,
+      accountId,
+      ...(profileId ? { profileId } : {}),
+      startedAt: new Date().toISOString(),
+      status: "running",
+      objective,
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+      dataPurchases: [],
+      spentDataHbar: 0,
+      tradeProposals: [],
+      tradeExecutions: [],
+      pendingTradeIds: [],
+      events,
+    };
+    store.addRun(record, profileId);
+    try {
+      if (store.isHalted()) throw new Error("Global kill switch is active");
+      event("portfolio.read", "Reading live portfolio", `Fetching Mirror Node holdings for ${accountId}`);
+      const rawPortfolio = await readPortfolio(accountId);
+      record.portfolioBefore = rawPortfolio; store.updateRun(runId, { portfolioBefore: rawPortfolio }, profileId);
+      const mode = state.profiles?.find((profile) => profile.id === profileId)?.autonomyMode ?? 3;
+      if (mode === 1) {
+        record.recommendation = { summary: "Observe-only mode recorded the live portfolio without purchasing intelligence or proposing a trade.", action: "watch", confidence: 1, rationale: ["Autonomy mode 1"], source: "deterministic" };
+        record.status = "completed"; record.completedAt = new Date().toISOString();
+        event("analysis.completed", "Observe-only check-in complete", record.recommendation.summary);
+        store.updateRun(runId, record, profileId); return record;
+      }
+      const prices: Record<string, number> = {};
+      const selected = ASSETS.filter((symbol) => state.schedule.watchedSymbols.length === 0 || state.schedule.watchedSymbols.includes(symbol));
+      if (selected.length !== ASSETS.length) throw new Error("HBAR, USDC, and SAUCE must all have live intelligence before allocation decisions");
+      let spend = 0n;
+      const cycleBudget = BigInt(Math.floor(state.schedule.dataBudgetHbar * 1e8));
+      const dailyBudget = BigInt(Math.floor(state.schedule.dailyBudgetCapHbar * 1e8));
+      const alreadySpentToday = BigInt(Math.floor(state.spending.todayDataHbar * 1e8));
+      for (const symbol of selected) {
+        const cached = this.signalCache.get(symbol);
+        if (cached && Date.now() - cached.at < 60_000) {
+          prices[symbol] = cached.price;
+          event("data.received", `${symbol} intelligence reused`, "A paid signal inside its freshness window was reused.", { provenance: "cached" });
+          continue;
+        }
+        const remainingCycle = cycleBudget - spend;
+        const remainingDaily = dailyBudget - alreadySpentToday - spend;
+        const remaining = remainingCycle < remainingDaily ? remainingCycle : remainingDaily;
+        if (remaining <= 0n) throw new Error("x402 data budget exhausted before all required asset signals were acquired");
+        event("payment.required", `Buying ${symbol} intelligence`, "Requesting a real x402 quote.");
+        const result = await this.intelligence.run({ symbol, objective: record.objective, portfolio: [], budgetAtomic: remaining.toString() });
+        if (result.status !== "completed" || !result.purchase) throw new Error(`Unable to obtain verified paid intelligence for ${symbol}: ${result.error ?? "unknown error"}`);
+        const signal = paidSignal(result.purchase.data);
+        if (!signal?.price) throw new Error(`Paid intelligence for ${symbol} lacked a usable price`);
+        prices[symbol] = signal.price; spend += BigInt(result.purchase.amountAtomic);
+        this.signalCache.set(symbol, { price: signal.price, at: Date.now(), provenance: signal.provenance });
+        const amountHbar = Number(BigInt(result.purchase.amountAtomic)) / 1e8;
+        record.dataPurchases.push({ symbol, productId: result.purchase.productId, amountHbar, transactionId: result.purchase.transactionId, hashscanUrl: result.purchase.hashscanUrl, data: result.purchase.data });
+        store.recordSpend(amountHbar, 0, profileId);
+        event("payment.settled", `${symbol} payment verified`, `x402 receipt ${result.purchase.transactionId}`, { transactionId: result.purchase.transactionId, hashscanUrl: result.purchase.hashscanUrl, provenance: signal.provenance });
+      }
+      record.spentDataHbar = Number(spend) / 1e8;
+      const managedAllocations = ASSETS.map((symbol) => rawPortfolio.allocations.find((allocation) => allocation.symbol.toUpperCase() === symbol) ?? {
+        symbol,
+        tokenId: symbol === "HBAR" ? undefined : saucerConfig(this.config).tokenIds[symbol],
+        balanceFormatted: 0,
+        usdValue: 0,
+        allocationPct: 0,
+      });
+      const portfolio = valuePortfolio({ ...rawPortfolio, allocations: managedAllocations }, prices);
+      record.portfolioBefore = portfolio; store.updateRun(runId, { portfolioBefore: portfolio, dataPurchases: record.dataPurchases, spentDataHbar: record.spentDataHbar }, profileId);
+      const candidate = proposeBandRebalance(portfolio.allocations, DEFAULT_BANDS);
+      const recommendation: AgentRecommendation = { summary: candidate.reason, action: candidate.action === "swap" ? "rebalance" : "watch", confidence: 1, rationale: ["Deterministic allocation-band evaluation", "All three values were paid x402 live signals", candidate.reason], source: "deterministic" };
+      record.recommendation = recommendation; event("analysis.completed", "Deterministic portfolio evaluation", recommendation.summary, { recommendation });
+      if (mode === 2) { record.status = "completed"; record.completedAt = new Date().toISOString(); store.updateRun(runId, record, profileId); return record; }
+      if (candidate.action === "swap" && candidate.fromSymbol && candidate.toSymbol) {
+        const source = portfolio.allocations.find((allocation) => allocation.symbol === candidate.fromSymbol);
+        const configuredMaxPct = 5;
+        const hbarAtomicCapPct = candidate.fromSymbol === "HBAR" && source?.balanceFormatted
+          ? Number(BigInt(this.config.tradeMaxAmountTinybar ?? "1000000000")) / 1e8 / source.balanceFormatted * 100
+          : configuredMaxPct;
+        const executablePct = Math.min(candidate.percentage, configuredMaxPct, hbarAtomicCapPct);
+        const proposal: TradeProposal = { action: "swap", fromSymbol: candidate.fromSymbol, toSymbol: candidate.toSymbol, percentage: executablePct, amountFormatted: source ? source.balanceFormatted * executablePct / 100 : 0, reasoning: `${candidate.reason} The executable tranche is capped by portfolio policy.`, confidence: 1, source: "deterministic" };
+        record.tradeProposals = [proposal];
+        const fromToken = candidate.fromSymbol === "HBAR" ? undefined : rawPortfolio.tokens.find((token) => token.symbol.toUpperCase() === candidate.fromSymbol);
+        const toToken = candidate.toSymbol === "HBAR" ? undefined : rawPortfolio.tokens.find((token) => token.symbol.toUpperCase() === candidate.toSymbol);
+        const fromDecimals = candidate.fromSymbol === "HBAR" ? 8 : fromToken?.decimals;
+        const toDecimals = candidate.toSymbol === "HBAR" ? 8 : toToken?.decimals ?? 6;
+        if (fromDecimals === undefined) throw new Error(`Cannot quote ${candidate.fromSymbol}: token decimals are unavailable`);
+        const amountIn = BigInt(Math.floor(proposal.amountFormatted * 10 ** fromDecimals));
+        const dexConfig = saucerConfig(this.config);
+        const quote = await quoteSaucerExactInput({
+          fromSymbol: candidate.fromSymbol, toSymbol: candidate.toSymbol, amountIn,
+          amountInFormatted: proposal.amountFormatted, expectedAmountOutFormatted: 0,
+          config: dexConfig,
+          quoter: createMirrorExactInputQuoter({ mirrorBaseUrl: this.config.mirrorNodeBaseUrl, config: dexConfig }),
+        });
+        quote.expectedAmountOutFormatted = Number(quote.expectedAmountOut) / 10 ** toDecimals;
+        quote.amountOutMinimum = quote.expectedAmountOut * BigInt(10_000 - Number(this.config.tradeSlippageBps ?? "100")) / 10_000n;
+        const provenance = Array.from(this.signalCache.values()).some((signal) => signal.provenance === "fallback") ? "fallback" : "live";
+        const amountUsd = (source?.usdValue ?? 0) * executablePct / 100;
+        const policy = this.tradePolicy.validate(proposal, { availableBalance: source?.balanceFormatted ?? 0, portfolioUsd: portfolio.totalUsdValue ?? 0, amountUsd, provenance, halted: store.isHalted(), quote });
+        event(policy.approved ? "trade.proposed" : "trade.skipped", policy.approved ? "Trade proposed" : "Trade blocked", policy.reason, { proposal });
+        if (policy.approved) {
+          const builtTransaction = buildExactInputTransaction({
+            quote,
+            recipientSolidityAddress: await resolveAccountEvmAddress(accountId, { mirrorBaseUrl: this.config.mirrorNodeBaseUrl }),
+            slippageBps: Number(this.config.tradeSlippageBps ?? "100"), config: dexConfig, ttlSeconds: 600,
+          });
+          const canExecuteAutonomously = state.schedule.autonomousTrading && accountId === this.config.agentPayerId && Boolean(this.config.agentPayerKey);
+          if (canExecuteAutonomously) {
+            event("trade.approved", "Trade passed autonomous policy", "Submitting the verified SaucerSwap V2 call.", { quote });
+            const result = await executeSaucerSwap({ payerId: accountId, payerKey: this.config.agentPayerKey!, quote, transaction: builtTransaction, mirrorBaseUrl: this.config.mirrorNodeBaseUrl });
+            record.tradeExecutions.push(result);
+            store.recordSpend(0, proposal.amountFormatted, profileId);
+            event("trade.verified", "Trade verified on Hedera", `${proposal.amountFormatted} ${proposal.fromSymbol} → ${quote.expectedAmountOutFormatted} ${proposal.toSymbol}`, { result });
+          } else {
+            const pending: PendingTrade = { id: randomUUID(), runId, accountId, proposal, quote, builtTransaction, createdAt: new Date().toISOString(), status: "pending" };
+            store.addPendingTrade(pending, profileId); record.pendingTradeIds.push(pending.id); record.status = "waiting_approval";
+          }
+        }
+      }
+      if (record.status !== "waiting_approval") record.status = "completed";
+      record.completedAt = new Date().toISOString(); store.updateRun(runId, record, profileId); sseBroadcaster.broadcast("agent.completed", { runId, record }, { profileId, runId }); return record;
+    } catch (error) {
+      record.status = "failed"; record.error = error instanceof Error ? error.message : "Multi-asset agent run failed"; record.completedAt = new Date().toISOString(); event("run.failed", "Run stopped safely", record.error); store.updateRun(runId, record, profileId); return record;
+    }
+  }
+}

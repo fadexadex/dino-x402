@@ -37,6 +37,7 @@ const COIN_IDS: Record<string, string> = {
   ETH: "ethereum",
   SOL: "solana",
   USDC: "usd-coin",
+  SAUCE: "saucerswap",
 };
 
 const responseCache = new Map<string, { expiresAt: number; value: unknown }>();
@@ -108,7 +109,7 @@ export class MarketDataProvider implements DataProvider {
     const symbol = (params.symbol ?? "").toUpperCase();
     const coinId = COIN_IDS[symbol];
     if (!coinId) {
-      throw new Error(`Unsupported symbol: ${symbol}. Try HBAR, BTC, ETH, SOL, or USDC.`);
+      throw new Error(`Unsupported symbol: ${symbol}. Try HBAR, USDC, or SAUCE.`);
     }
 
     try {

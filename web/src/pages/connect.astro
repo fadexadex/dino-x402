@@ -1,0 +1,8 @@
+---
+import Base from "../layouts/Base.astro";
+import { ConnectApp } from "../components/react/ConnectApp";
+---
+
+<Base title="Connect a wallet — Dino Agent" description="Connect a Hedera account for Dino Agent to observe.">
+  <ConnectApp client:only="react" />
+</Base>
