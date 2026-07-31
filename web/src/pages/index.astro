@@ -1,27 +1,98 @@
 ---
 import Base from "../layouts/Base.astro";
 import Nav from "../components/Nav.astro";
-import Hero from "../components/Hero.astro";
-import HowItWorks from "../components/HowItWorks.astro";
-import Quickstart from "../components/Quickstart.astro";
-import ForAgents from "../components/ForAgents.astro";
-import CatalogPricing from "../components/CatalogPricing.astro";
-import PaymentDetails from "../components/PaymentDetails.astro";
-import EndpointReference from "../components/EndpointReference.astro";
-import Limitations from "../components/Limitations.astro";
-import Footer from "../components/Footer.astro";
+import AgentWorkbench from "../components/AgentWorkbench.astro";
+import { site } from "../data/site.ts";
+import { catalog } from "../data/fixtures.ts";
+import { tinybarToHbar } from "../lib/format.ts";
 ---
-<Base title="x402 Hedera | Pay-per-call market data for agents" description="Pay-per-call mock financial market data over the x402 protocol, settled on Hedera testnet in HBAR. No accounts, no API keys.">
+
+<Base title="MarketRail | Autonomous market data on Hedera" description="An AI portfolio agent that buys market data per query through x402 and settles every request on Hedera testnet.">
   <Nav />
   <main>
-    <Hero />
-    <HowItWorks />
-    <Quickstart />
-    <ForAgents />
-    <CatalogPricing />
-    <PaymentDetails />
-    <EndpointReference />
-    <Limitations />
+    <section id="top" class="mx-auto max-w-7xl px-5 pb-16 pt-14 sm:px-6 md:pb-24 md:pt-20">
+      <div class="grid items-start gap-12 lg:grid-cols-[0.78fr_1.22fr] lg:gap-16">
+        <div class="pt-3">
+          <div class="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 font-mono text-[11px] font-medium uppercase tracking-[0.14em] text-muted">
+            <span class="size-1.5 rounded-full bg-success"></span>
+            x402 · Hedera testnet
+          </div>
+          <h1 class="mt-6 max-w-[12ch] text-[clamp(2.65rem,6vw,4.8rem)] font-semibold leading-[0.98] tracking-[-0.055em] text-text">
+            Market insight, paid one query at a time.
+          </h1>
+          <p class="mt-6 max-w-[50ch] text-lg leading-8 text-muted">
+            MarketRail is an autonomous portfolio agent. It chooses the data it needs, pays through x402, and returns a recommendation with a verifiable Hedera receipt.
+          </p>
+          <div class="mt-8 flex flex-wrap gap-3">
+            <a href="#demo" class="focus-ring rounded-lg bg-accent px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-accent-dim">Run the agent</a>
+            <a href={site.repoUrl} class="focus-ring rounded-lg border border-border bg-surface px-5 py-3 text-sm font-semibold text-text transition hover:border-accent/40">View source ↗</a>
+          </div>
+          <dl class="mt-10 grid grid-cols-3 gap-4 border-t border-border pt-6">
+            <div><dt class="text-xs text-faint">Protocol</dt><dd class="mt-1 font-mono text-sm font-medium">x402 v2</dd></div>
+            <div><dt class="text-xs text-faint">Settlement</dt><dd class="mt-1 font-mono text-sm font-medium">Hedera</dd></div>
+            <div><dt class="text-xs text-faint">From</dt><dd class="mt-1 font-mono text-sm font-medium">0.01 HBAR</dd></div>
+          </dl>
+        </div>
+        <AgentWorkbench />
+      </div>
+    </section>
+
+    <section id="architecture" class="border-y border-border bg-surface">
+      <div class="mx-auto max-w-7xl px-5 py-20 sm:px-6 md:py-28">
+        <div class="grid gap-10 lg:grid-cols-[0.65fr_1.35fr] lg:gap-16">
+          <div>
+            <p class="font-mono text-xs font-semibold uppercase tracking-[0.14em] text-accent">One autonomous loop</p>
+            <h2 class="mt-4 text-3xl font-semibold tracking-[-0.035em] md:text-4xl">The payment is part of the request.</h2>
+            <p class="mt-4 max-w-[48ch] leading-7 text-muted">The API describes its price in the 402 response. The agent signs once, the facilitator settles it, and the paid response returns.</p>
+          </div>
+          <ol class="grid gap-px overflow-hidden rounded-xl border border-border bg-border sm:grid-cols-5">
+            {[
+              ["01", "Ask", "Agent selects a dataset"],
+              ["02", "402", "API returns exact terms"],
+              ["03", "Sign", "Client approves payment"],
+              ["04", "Settle", "Hedera confirms transfer"],
+              ["05", "Decide", "Data informs the answer"],
+            ].map(([n, title, body]) => (
+              <li class="bg-bg p-5 sm:min-h-44">
+                <span class="font-mono text-xs text-accent">{n}</span>
+                <h3 class="mt-6 font-semibold">{title}</h3>
+                <p class="mt-2 text-sm leading-6 text-faint">{body}</p>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <section id="pricing" class="mx-auto max-w-7xl px-5 py-20 sm:px-6 md:py-28">
+      <div class="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+        <div><p class="font-mono text-xs font-semibold uppercase tracking-[0.14em] text-accent">Live catalog</p><h2 class="mt-4 text-3xl font-semibold tracking-[-0.035em] md:text-4xl">Pay only for what the agent reads.</h2></div>
+        <a href={`${site.apiBase}/catalog`} class="text-sm font-semibold text-accent hover:underline">Machine-readable catalog ↗</a>
+      </div>
+      <div class="mt-10 overflow-hidden rounded-xl border border-border bg-surface panel-shadow">
+        <div class="hidden grid-cols-[1fr_1.5fr_0.7fr] border-b border-border bg-surface-2 px-6 py-3 text-xs font-medium text-faint sm:grid">
+          <span>Product</span><span>What the agent gets</span><span class="text-right">Price / call</span>
+        </div>
+        {catalog.products.map((product) => (
+          <div class="grid gap-2 border-b border-border px-5 py-5 last:border-0 sm:grid-cols-[1fr_1.5fr_0.7fr] sm:items-center sm:px-6">
+            <div><span class="font-mono text-sm font-medium text-text">{product.id}</span><div class="mt-1 flex gap-1.5">{Object.keys(product.paramsSchema).map((p) => <span class="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-faint">{p}</span>)}</div></div>
+            <p class="text-sm text-muted">{product.description}</p>
+            <p class="font-mono text-sm font-semibold text-settle sm:text-right">{tinybarToHbar(product.priceAtomic)} HBAR</p>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <section id="docs" class="border-t border-border bg-surface">
+      <div class="mx-auto grid max-w-7xl gap-12 px-5 py-20 sm:px-6 md:grid-cols-2 md:py-24">
+        <div><p class="font-mono text-xs font-semibold uppercase tracking-[0.14em] text-accent">Agent-ready</p><h2 class="mt-4 max-w-[18ch] text-3xl font-semibold tracking-[-0.035em]">No account system. No annual contract.</h2><p class="mt-4 max-w-[52ch] leading-7 text-muted">Agents discover the catalog, read the x402 terms, and pay with a funded Hedera testnet signer. The resource server never holds the payer key.</p></div>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <a href="/llms.txt" class="focus-ring rounded-xl border border-border bg-bg p-5 transition hover:border-accent/40"><span class="font-mono text-xs text-faint">/llms.txt</span><strong class="mt-8 block">Agent instructions ↗</strong></a>
+          <a href={`${site.apiBase}/catalog`} class="focus-ring rounded-xl border border-border bg-bg p-5 transition hover:border-accent/40"><span class="font-mono text-xs text-faint">GET /catalog</span><strong class="mt-8 block">Product discovery ↗</strong></a>
+          <a href={site.repoUrl} class="focus-ring rounded-xl border border-border bg-bg p-5 transition hover:border-accent/40 sm:col-span-2"><span class="font-mono text-xs text-faint">Open source · TypeScript</span><strong class="mt-8 block">Inspect the full x402 + Hedera implementation ↗</strong></a>
+        </div>
+      </div>
+    </section>
   </main>
-  <Footer />
+  <footer class="border-t border-border bg-surface"><div class="mx-auto flex max-w-7xl flex-col gap-3 px-5 py-8 text-sm text-faint sm:flex-row sm:items-center sm:justify-between sm:px-6"><span>MarketRail · x402 on Hedera testnet</span><span>Live CoinGecko data with a clearly labeled deterministic fallback.</span></div></footer>
 </Base>

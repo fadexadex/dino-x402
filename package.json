@@ -10,6 +10,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "e2e": "tsx scripts/e2e-pay.ts",
+    "preflight": "tsx scripts/preflight.ts",
     "web:dev": "npm run dev -w web",
     "web:build": "npm run build -w web",
     "web:preview": "npm run preview -w web",
@@ -18,14 +19,32 @@
   "workspaces": [
     "web"
   ],
+  "overrides": {
+    "@hiero-ledger/proto": {
+      "protobufjs": "8.7.1"
+    },
+    "@hiero-ledger/sdk": {
+      "@grpc/grpc-js": "1.14.4",
+      "protobufjs": "$protobufjs"
+    },
+    "@grpc/proto-loader": {
+      "protobufjs": "7.6.5"
+    },
+    "ethers": {
+      "ws": "8.21.1"
+    },
+    "fast-uri": "4.1.1"
+  },
   "dependencies": {
-    "@hono/node-server": "^1.13.0",
-    "@x402/core": "2.16.0",
-    "@x402/fetch": "2.16.0",
-    "@x402/hedera": "2.16.0",
-    "@x402/hono": "2.16.0",
+    "@hono/node-server": "2.0.12",
+    "@x402/core": "2.20.0",
+    "@x402/fetch": "2.20.0",
+    "@x402/hedera": "2.20.0",
+    "@x402/hono": "2.20.0",
     "dotenv": "^16.4.0",
-    "hono": "^4.6.0"
+    "hono": "^4.6.0",
+    "protobufjs": "8.7.1",
+    "ws": "8.21.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

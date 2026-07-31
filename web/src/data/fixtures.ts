@@ -16,21 +16,21 @@ export const catalog: Catalog = {
   products: [
     {
       id: "spot-price",
-      description: "Last traded price for a symbol",
+      description: "Live USD spot price for a supported digital asset",
       asset: "0.0.0",
       priceAtomic: "1000000",
       paramsSchema: { symbol: { type: "string", required: true } },
     },
     {
       id: "quote",
-      description: "Best bid/ask with sizes for a symbol",
+      description: "Live USD price, 24 hour change, and market volume",
       asset: "0.0.0",
       priceAtomic: "2000000",
       paramsSchema: { symbol: { type: "string", required: true } },
     },
     {
       id: "ohlc",
-      description: "Daily OHLC candle for a symbol and date",
+      description: "Latest live USD OHLC candle for a digital asset",
       asset: "0.0.0",
       priceAtomic: "5000000",
       paramsSchema: {

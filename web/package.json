@@ -10,19 +10,15 @@
     "test": "vitest run",
     "typecheck": "astro check"
   },
-  "dependencies": {
-    "astro": "^5.6.0",
-    "@tailwindcss/vite": "^4.0.0",
-    "tailwindcss": "^4.0.0",
+  "dependencies": {},
+  "devDependencies": {
+    "@astrojs/check": "^0.9.0",
     "@fontsource-variable/geist": "^5.1.0",
     "@fontsource-variable/geist-mono": "^5.1.0",
-    "astro-icon": "^1.1.5",
-    "@iconify-json/ph": "^1.2.0",
-    "gsap": "^3.12.5"
-  },
-  "devDependencies": {
-    "vitest": "^3.0.0",
-    "@astrojs/check": "^0.9.0",
-    "typescript": "^5.6.0"
+    "@tailwindcss/vite": "^4.0.0",
+    "astro": "5.18.2",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
   }
 }

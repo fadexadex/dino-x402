@@ -16,7 +16,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site).toString();
     <link rel="canonical" href={canonical} />
     <title>{title}</title>
     <meta name="description" content={description} />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
@@ -24,8 +24,8 @@ const canonical = new URL(Astro.url.pathname, Astro.site).toString();
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="alternate" type="text/markdown" href="/llms.txt" title="llms.txt" />
   </head>
-  <body class="min-h-[100dvh] bg-bg font-sans text-text antialiased selection:bg-accent/20">
-    <div class="bg-atmosphere" aria-hidden="true"></div>
+  <body class="min-h-[100dvh] bg-bg font-sans text-text antialiased">
+    <div class="page-grid pointer-events-none fixed inset-0 -z-10" aria-hidden="true"></div>
     <slot />
   </body>
 </html>

@@ -4,7 +4,7 @@
 // Usage:  printf '%s' "<payment-required header value>" | tsx x402-sign.ts
 //   stdin  = value of the `payment-required` header from the 402 response
 //   stdout = value of the `payment-signature` header to send on the retry
-//   env    = HEDERA_CLIENT_ID, HEDERA_CLIENT_KEY (funded ECDSA testnet), HEDERA_NETWORK
+//   env    = payer credentials plus the fail-closed policy documented in .env.example
 //
 // The private key is read from .env and never written to stdout, argv, or logs.
 
@@ -19,6 +19,7 @@ import {
     decodePaymentRequiredHeader,
     encodePaymentSignatureHeader,
 } from "@x402/core/http";
+import { applyPaymentPolicy, loadPaymentPolicy } from "./payment-policy.js";
 
 const required = (name: string): string => {
     const value = process.env[name];
@@ -53,6 +54,7 @@ const client = new x402Client().register(
 );
 
 const paymentRequired = decodePaymentRequiredHeader(paymentRequiredHeader);
-const payload = await client.createPaymentPayload(paymentRequired);
+const approvedPaymentRequired = applyPaymentPolicy(paymentRequired, loadPaymentPolicy());
+const payload = await client.createPaymentPayload(approvedPaymentRequired);
 
 process.stdout.write(encodePaymentSignatureHeader(payload));

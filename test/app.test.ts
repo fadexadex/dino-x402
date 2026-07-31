@@ -11,7 +11,7 @@ const config: ServerConfig = {
   port: 4021,
 };
 
-const app = createApp(new MockDataProvider(), config);
+const app = createApp(new MockDataProvider(), config, { initializePayments: false });
 
 describe("resource server pre-validation (offline)", () => {
   it("404 for an unknown product", async () => {
@@ -29,5 +29,30 @@ describe("resource server pre-validation (offline)", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { products: unknown[] };
     expect(body.products.length).toBe(3);
+  });
+
+  it("reports readiness as booleans without exposing credential material", async () => {
+    const secretConfig: ServerConfig = {
+      ...config,
+      agentPayerId: "0.0.5678",
+      agentPayerKey: "test-only-private-key",
+      mistralApiKey: "test-only-mistral-key",
+    };
+    const secretApp = createApp(new MockDataProvider(), secretConfig, { initializePayments: false });
+    const res = await secretApp.request("/api/health");
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(JSON.parse(text).agent).toEqual({ paymentReady: true, mistralReady: true });
+    expect(text).not.toContain(secretConfig.agentPayerKey);
+    expect(text).not.toContain(secretConfig.mistralApiKey);
+  });
+
+  it("rejects malformed agent JSON before running", async () => {
+    const res = await app.request("/api/agent/run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not-json",
+    });
+    expect(res.status).toBe(400);
   });
 });

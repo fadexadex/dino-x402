@@ -6,104 +6,63 @@
   --font-sans: "Geist Variable", system-ui, sans-serif;
   --font-mono: "Geist Mono Variable", ui-monospace, monospace;
 
-  --color-bg: #09090b;
-  --color-surface: #131316;
-  --color-surface-2: #1b1b1f;
-  --color-border: #27272a;
-  --color-text: #fafafa;
-  --color-muted: #a1a1aa;
-  --color-faint: #8b8b94;
-  --color-accent: #34d399;
-  --color-accent-dim: #10b981;
+  --color-bg: #f6f8fb;
+  --color-surface: #ffffff;
+  --color-surface-2: #eef3f8;
+  --color-border: #d9e2ec;
+  --color-text: #10233f;
+  --color-muted: #40566f;
+  --color-faint: #6b7e91;
+  --color-accent: #2457d6;
+  --color-accent-dim: #1947b8;
+  --color-settle: #0b7a75;
+  --color-success: #157a4d;
 }
 
+:root { color-scheme: light; }
+
 html {
-  background-color: var(--color-bg);
+  background: var(--color-bg);
   color: var(--color-text);
   scroll-behavior: smooth;
   -webkit-font-smoothing: antialiased;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  html { scroll-behavior: auto; }
-}
+body { margin: 0; }
 
-/* Fixed atmosphere: faint grid fading out + a single emerald glow top-center. */
-.bg-atmosphere {
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background:
-    radial-gradient(60% 42% at 50% -8%, rgb(52 211 153 / 0.16), transparent 70%),
-    radial-gradient(40% 30% at 85% 6%, rgb(16 185 129 / 0.08), transparent 70%);
-}
+::selection { background: rgb(36 87 214 / 0.14); }
 
-.bg-atmosphere::before {
-  content: "";
-  position: absolute;
-  inset: 0;
+.page-grid {
   background-image:
-    linear-gradient(to right, rgb(255 255 255 / 0.03) 1px, transparent 1px),
-    linear-gradient(to bottom, rgb(255 255 255 / 0.03) 1px, transparent 1px);
-  background-size: 56px 56px;
-  mask-image: radial-gradient(120% 70% at 50% 0%, #000 30%, transparent 75%);
-  -webkit-mask-image: radial-gradient(120% 70% at 50% 0%, #000 30%, transparent 75%);
+    linear-gradient(rgb(16 35 63 / 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(16 35 63 / 0.025) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: linear-gradient(to bottom, #000 0, transparent 700px);
 }
 
-/* Scroll-in reveal (native scroll-driven). */
+.panel-shadow { box-shadow: 0 22px 60px -36px rgb(16 35 63 / 0.32); }
+
+.focus-ring:focus-visible {
+  outline: 3px solid rgb(36 87 214 / 0.22);
+  outline-offset: 2px;
+}
+
 .reveal {
   opacity: 0;
-  transform: translateY(20px);
+  transform: translateY(12px);
   animation: reveal-in linear both;
   animation-timeline: view();
-  animation-range: entry 0% cover 28%;
+  animation-range: entry 0% cover 24%;
 }
 
-@keyframes reveal-in {
-  to { opacity: 1; transform: translateY(0); }
-}
+@keyframes reveal-in { to { opacity: 1; transform: translateY(0); } }
 
-/* On-load entrance, staggered via inline animation-delay. Default state is visible. */
-@media (prefers-reduced-motion: no-preference) {
-  .fade-up {
-    opacity: 0;
-    animation: fade-up 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
-  }
-}
+@keyframes spin { to { transform: rotate(360deg); } }
 
-@keyframes fade-up {
-  from { opacity: 0; transform: translateY(16px); }
-  to { opacity: 1; transform: translateY(0); }
-}
+.is-spinning { animation: spin 0.8s linear infinite; }
 
 @media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
   .reveal { opacity: 1; transform: none; animation: none; }
-}
-
-/* Hover-lit card: brighter border + faint top-edge highlight on hover. */
-.card-glow {
-  position: relative;
-  transition: border-color 0.3s ease, transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.card-glow::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1px;
-  background: linear-gradient(180deg, rgb(52 211 153 / 0.35), transparent 60%);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  opacity: 0;
-  transition: opacity 0.3s ease;
-  pointer-events: none;
-}
-
-.card-glow:hover::after { opacity: 1; }
-
-@media (hover: hover) and (prefers-reduced-motion: no-preference) {
-  .card-glow:hover { transform: translateY(-2px); }
 }

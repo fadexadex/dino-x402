@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { paymentMiddleware } from "@x402/hono";
 import { x402ResourceServer } from "@x402/core/server";
 import type { RoutesConfig } from "@x402/core/server";
@@ -8,15 +9,22 @@ import type { DataProvider } from "../core/provider.js";
 import type { ServerConfig } from "../core/config.js";
 import { buildFacilitator } from "../core/facilitator.js";
 import { validateRequest, productIdFromPath, priceForProduct } from "../core/catalog.js";
+import { AgentRunner } from "../agent/runner.js";
+import type { AgentRunInput } from "../agent/types.js";
 
-export const createApp = (provider: DataProvider, config: ServerConfig): Hono => {
+export interface CreateAppOptions {
+  initializePayments?: boolean;
+}
+
+export const createApp = (
+  provider: DataProvider,
+  config: ServerConfig,
+  options: CreateAppOptions = {},
+): Hono => {
   const catalog = provider.catalog();
   const app = new Hono();
-
-  const x402Server = new x402ResourceServer(buildFacilitator(config.facilitatorUrl)).register(
-    "hedera:*",
-    new ExactHederaScheme(),
-  );
+  const agent = new AgentRunner(config);
+  const initializePayments = options.initializePayments ?? true;
 
   const routes: RoutesConfig = {
     "GET /data/:product": {
@@ -36,6 +44,39 @@ export const createApp = (provider: DataProvider, config: ServerConfig): Hono =>
     return c.json({ error: "Internal server error" }, 500);
   });
 
+  app.use("/api/*", cors({
+    origin: (origin) => {
+      if (!origin || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return origin;
+      return "";
+    },
+    allowHeaders: ["Content-Type"],
+    allowMethods: ["GET", "POST", "OPTIONS"],
+  }));
+
+  app.get("/api/health", (c) => c.json({
+    status: "ok",
+    network: config.hederaNetwork,
+    providerId: provider.id,
+    agent: {
+      paymentReady: agent.isPaymentReady(),
+      mistralReady: Boolean(config.mistralApiKey),
+    },
+  }));
+
+  app.post("/api/agent/run", async (c) => {
+    let input: AgentRunInput = {};
+    const contentType = c.req.header("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      try {
+        input = await c.req.json<AgentRunInput>();
+      } catch {
+        return c.json({ error: "Request body must be valid JSON" }, 400);
+      }
+    }
+    const result = await agent.run(input);
+    return c.json(result, result.status === "completed" ? 200 : 502);
+  });
+
   app.get("/catalog", (c) => c.json({ providerId: provider.id, products: catalog }));
 
   app.use("/data/:product", async (c, next) => {
@@ -45,7 +86,13 @@ export const createApp = (provider: DataProvider, config: ServerConfig): Hono =>
     await next();
   });
 
-  app.use("*", paymentMiddleware(routes, x402Server));
+  if (initializePayments) {
+    const x402Server = new x402ResourceServer(buildFacilitator(config.facilitatorUrl)).register(
+      "hedera:*",
+      new ExactHederaScheme(),
+    );
+    app.use("*", paymentMiddleware(routes, x402Server));
+  }
 
   app.get("/data/:product", async (c) => {
     const productId = c.req.param("product");

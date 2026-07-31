@@ -1,0 +1,199 @@
+---
+const presets = [
+  { id: "risk", label: "Risk check", value: "Review my portfolio concentration and flag the position that needs attention first." },
+  { id: "opportunity", label: "Opportunity", value: "Find the strongest near-term opportunity in my portfolio using current market data." },
+  { id: "snapshot", label: "Daily snapshot", value: "Give me a concise market snapshot and one actionable portfolio recommendation." },
+];
+---
+
+<section id="demo" class="panel-shadow overflow-hidden rounded-2xl border border-border bg-surface" aria-labelledby="workbench-title">
+  <div class="flex items-center justify-between border-b border-border px-5 py-4 sm:px-6">
+    <div><p class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">Autonomous run</p><h2 id="workbench-title" class="mt-1 font-semibold">Portfolio agent</h2></div>
+    <span class="rounded-full bg-[#e8f5ef] px-2.5 py-1 text-xs font-medium text-success">Ready</span>
+  </div>
+
+  <form id="agent-form" class="p-5 sm:p-6">
+    <fieldset>
+      <legend class="text-sm font-medium text-text">Choose an objective</legend>
+      <div class="mt-3 flex flex-wrap gap-2">
+        {presets.map((preset, index) => (
+          <button type="button" data-preset={preset.value} aria-pressed={index === 0 ? "true" : "false"} class={`focus-ring rounded-full border px-3 py-1.5 text-xs font-medium transition ${index === 0 ? "border-accent bg-[#edf2ff] text-accent" : "border-border bg-bg text-muted hover:border-accent/40"}`}>{preset.label}</button>
+        ))}
+      </div>
+    </fieldset>
+    <label class="mt-5 block text-sm font-medium text-text" for="objective">Agent objective</label>
+    <textarea id="objective" name="objective" rows="3" class="focus-ring mt-2 w-full resize-none rounded-lg border border-border bg-bg px-3.5 py-3 text-sm leading-6 text-text placeholder:text-faint" required>Review my portfolio concentration and flag the position that needs attention first.</textarea>
+    <label class="mt-4 block text-sm font-medium text-text" for="portfolio">Portfolio allocation</label>
+    <input id="portfolio" name="portfolio" value="HBAR 48%, BTC 32%, ETH 20%" class="focus-ring mt-2 w-full rounded-lg border border-border bg-bg px-3.5 py-3 font-mono text-sm text-text" required />
+    <div class="mt-5 flex items-center justify-between gap-4 rounded-lg bg-surface-2 px-4 py-3">
+      <div><p class="text-xs text-faint">Agent budget</p><p class="mt-0.5 font-mono text-sm font-medium">≤ 0.05 HBAR</p></div>
+      <p class="max-w-[23ch] text-right text-xs leading-5 text-faint">Agent chooses and pays for only the query it needs.</p>
+    </div>
+    <button id="run-agent" type="submit" class="focus-ring mt-5 flex min-h-12 w-full items-center justify-center gap-2 rounded-lg bg-accent px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-accent-dim disabled:cursor-wait disabled:opacity-70">
+      <span data-button-label>Run agent & pay</span><span aria-hidden="true">→</span>
+    </button>
+    <p class="mt-3 text-center text-[11px] leading-5 text-faint">Live testnet payment. The private key is never sent to this browser.</p>
+  </form>
+
+  <div id="run-output" class="hidden border-t border-border" aria-live="polite">
+    <div class="px-5 py-5 sm:px-6">
+      <div class="flex items-center justify-between"><h3 class="text-sm font-semibold">Payment trace</h3><span id="elapsed" class="font-mono text-xs text-faint"></span></div>
+      <ol class="mt-4 grid gap-2" id="payment-stages">
+        {[
+          ["request", "Request sent", "Agent selected a market-data query"],
+          ["terms", "402 received", "Exact HBAR terms discovered"],
+          ["signed", "Payment signed", "Payer authorized the transfer"],
+          ["settled", "Settled on Hedera", "Transaction confirmed on testnet"],
+          ["returned", "Data returned", "Recommendation is ready"],
+        ].map(([id, title, detail]) => (
+          <li data-stage={id} class="flex items-start gap-3 rounded-lg border border-transparent px-3 py-2.5 text-faint">
+            <span data-stage-icon class="mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border border-border bg-bg text-[10px]">•</span>
+            <span><strong class="block text-sm font-medium text-inherit">{title}</strong><span class="mt-0.5 block text-xs text-inherit">{detail}</span></span>
+          </li>
+        ))}
+      </ol>
+    </div>
+
+    <div id="success-result" class="hidden border-t border-border bg-[#f2faf7] px-5 py-5 sm:px-6">
+      <div class="flex items-start justify-between gap-4">
+        <div><p class="text-xs font-semibold uppercase tracking-[0.12em] text-success">Payment settled</p><h3 id="recommendation" class="mt-2 text-lg font-semibold leading-7 text-text"></h3></div>
+        <span class="grid size-8 shrink-0 place-items-center rounded-full bg-success text-sm text-white">✓</span>
+      </div>
+      <dl class="mt-5 grid grid-cols-2 gap-x-5 gap-y-4 border-t border-[#cce5da] pt-4 text-xs">
+        <div><dt class="text-faint">Paid</dt><dd id="paid-amount" class="mt-1 font-mono font-medium text-text">—</dd></div>
+        <div><dt class="text-faint">Dataset</dt><dd id="dataset" class="mt-1 font-mono font-medium text-text">—</dd></div>
+        <div class="col-span-2"><dt class="text-faint">Transaction</dt><dd id="transaction-id" class="mt-1 truncate font-mono font-medium text-text">—</dd></div>
+      </dl>
+      <div class="mt-5 flex flex-wrap gap-3">
+        <a id="hashscan-link" href="#" target="_blank" rel="noreferrer" class="focus-ring rounded-lg bg-text px-4 py-2.5 text-xs font-semibold text-white">View on HashScan ↗</a>
+        <button id="copy-transaction" type="button" class="focus-ring rounded-lg border border-[#cce5da] bg-surface px-4 py-2.5 text-xs font-semibold text-text">Copy transaction ID</button>
+      </div>
+      <details class="mt-4"><summary class="cursor-pointer text-xs text-faint">Inspect agent response</summary><pre id="raw-response" class="mt-3 max-h-52 overflow-auto rounded-lg bg-text p-3 font-mono text-[11px] leading-5 text-white"></pre></details>
+    </div>
+
+    <div id="error-result" class="hidden border-t border-[#f1c8c3] bg-[#fff6f5] px-5 py-5 sm:px-6">
+      <p class="text-xs font-semibold uppercase tracking-[0.12em] text-[#b42318]">Run interrupted</p>
+      <p id="error-message" class="mt-2 text-sm leading-6 text-muted"></p>
+      <button id="retry-agent" type="button" class="focus-ring mt-4 rounded-lg border border-[#e7aaa3] bg-surface px-4 py-2.5 text-xs font-semibold text-text">Retry payment</button>
+    </div>
+  </div>
+</section>
+
+<script>
+  const form = document.querySelector<HTMLFormElement>("#agent-form");
+  const output = document.querySelector<HTMLElement>("#run-output");
+  const button = document.querySelector<HTMLButtonElement>("#run-agent");
+  const buttonLabel = document.querySelector<HTMLElement>("[data-button-label]");
+  const success = document.querySelector<HTMLElement>("#success-result");
+  const errorBox = document.querySelector<HTMLElement>("#error-result");
+  const errorMessage = document.querySelector<HTMLElement>("#error-message");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let transactionId = "";
+
+  const stages = [...document.querySelectorAll<HTMLElement>("[data-stage]")];
+  const setStage = (index: number, state: "active" | "done") => {
+    const item = stages[index];
+    if (!item) return;
+    item.className = state === "done"
+      ? "flex items-start gap-3 rounded-lg border border-[#cce5da] bg-[#f2faf7] px-3 py-2.5 text-success"
+      : "flex items-start gap-3 rounded-lg border border-[#cdd9f7] bg-[#f4f7ff] px-3 py-2.5 text-accent";
+    const icon = item.querySelector<HTMLElement>("[data-stage-icon]");
+    if (icon) {
+      icon.textContent = state === "done" ? "✓" : "↻";
+      icon.classList.toggle("is-spinning", state === "active" && !reduceMotion);
+    }
+  };
+
+  const reset = () => {
+    success?.classList.add("hidden"); errorBox?.classList.add("hidden");
+    stages.forEach((item) => {
+      item.className = "flex items-start gap-3 rounded-lg border border-transparent px-3 py-2.5 text-faint";
+      const icon = item.querySelector<HTMLElement>("[data-stage-icon]");
+      if (icon) { icon.textContent = "•"; icon.classList.remove("is-spinning"); }
+    });
+  };
+
+  document.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach((preset) => {
+    preset.addEventListener("click", () => {
+      document.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach((item) => {
+        const selected = item === preset;
+        item.setAttribute("aria-pressed", String(selected));
+        item.className = `focus-ring rounded-full border px-3 py-1.5 text-xs font-medium transition ${selected ? "border-accent bg-[#edf2ff] text-accent" : "border-border bg-bg text-muted hover:border-accent/40"}`;
+      });
+      const objective = document.querySelector<HTMLTextAreaElement>("#objective");
+      if (objective) objective.value = preset.dataset.preset ?? "";
+    });
+  });
+
+  const getString = (...values: unknown[]) => values.find((v) => typeof v === "string" && v.length > 0) as string | undefined;
+
+  const run = async () => {
+    if (!form || !button || !output) return;
+    reset(); output.classList.remove("hidden"); button.disabled = true;
+    if (buttonLabel) buttonLabel.textContent = "Agent is working…";
+    const started = performance.now();
+    setStage(0, "active");
+    const timers = [
+      window.setTimeout(() => { setStage(0, "done"); setStage(1, "active"); }, 450),
+      window.setTimeout(() => { setStage(1, "done"); setStage(2, "active"); }, 1050),
+      window.setTimeout(() => { setStage(2, "done"); setStage(3, "active"); }, 1750),
+    ];
+    try {
+      const payload = Object.fromEntries(new FormData(form));
+      const portfolio = String(payload.portfolio).split(",").map((entry) => {
+        const match = entry.trim().toUpperCase().match(/^([A-Z0-9.-]{1,12})(?:\s+(\d+(?:\.\d+)?)%)?$/);
+        if (!match) return null;
+        return { symbol: match[1], ...(match[2] ? { allocationPct: Number(match[2]) } : {}) };
+      }).filter((holding): holding is { symbol: string; allocationPct?: number } => Boolean(holding));
+      if (!portfolio.length) throw new Error("Enter allocations like HBAR 48%, BTC 32%, ETH 20%.");
+      const response = await fetch("http://localhost:4021/api/agent/run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          objective: payload.objective,
+          symbol: portfolio[0]?.symbol ?? "HBAR",
+          portfolio,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(getString(data.error, data.message) ?? `Agent returned HTTP ${response.status}`);
+      timers.forEach(window.clearTimeout);
+      stages.forEach((_, i) => setStage(i, "done"));
+      const payment = data.purchase ?? data.payment ?? data.settlement ?? data.receipt ?? {};
+      const result = data.result ?? data;
+      transactionId = getString(payment.transaction, payment.transactionId, data.transaction, data.transactionId) ?? "Confirmed on Hedera testnet";
+      const recommendationObject = data.recommendation && typeof data.recommendation === "object" ? data.recommendation : {};
+      const recommendation = getString(recommendationObject.summary, data.analysis, result.summary) ?? "The paid market data is ready for your portfolio decision.";
+      const atomicAmount = getString(payment.amountAtomic, data.spentAtomic);
+      const amount = getString(payment.amount, payment.amountHbar, data.amount)
+        ?? (atomicAmount ? String(Number(atomicAmount) / 1e8) : "0.01");
+      const product = getString(payment.productId, data.product, result.product, data.dataset, result.dataset) ?? "market data";
+      const hashscan = getString(payment.hashscanUrl, data.hashscanUrl) ?? `https://hashscan.io/testnet/transaction/${encodeURIComponent(transactionId)}`;
+      document.querySelector<HTMLElement>("#recommendation")!.textContent = recommendation;
+      document.querySelector<HTMLElement>("#paid-amount")!.textContent = amount.includes("HBAR") ? amount : `${amount} HBAR`;
+      document.querySelector<HTMLElement>("#dataset")!.textContent = product;
+      document.querySelector<HTMLElement>("#transaction-id")!.textContent = transactionId;
+      document.querySelector<HTMLAnchorElement>("#hashscan-link")!.href = hashscan;
+      document.querySelector<HTMLElement>("#raw-response")!.textContent = JSON.stringify(data, null, 2);
+      document.querySelector<HTMLElement>("#elapsed")!.textContent = `${((performance.now() - started) / 1000).toFixed(1)}s`;
+      success?.classList.remove("hidden");
+    } catch (error) {
+      timers.forEach(window.clearTimeout);
+      stages.forEach((item) => item.querySelector("[data-stage-icon]")?.classList.remove("is-spinning"));
+      if (errorMessage) errorMessage.textContent = error instanceof Error ? error.message : "The payment could not be completed.";
+      errorBox?.classList.remove("hidden");
+    } finally {
+      button.disabled = false;
+      if (buttonLabel) buttonLabel.textContent = "Run agent & pay";
+    }
+  };
+
+  form?.addEventListener("submit", (event) => { event.preventDefault(); void run(); });
+  document.querySelector("#retry-agent")?.addEventListener("click", () => form?.requestSubmit());
+  document.querySelector("#copy-transaction")?.addEventListener("click", async (event) => {
+    await navigator.clipboard.writeText(transactionId);
+    const target = event.currentTarget as HTMLButtonElement;
+    target.textContent = "Copied";
+    window.setTimeout(() => target.textContent = "Copy transaction ID", 1400);
+  });
+</script>
