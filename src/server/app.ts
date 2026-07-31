@@ -312,6 +312,8 @@ export const createApp = (
     }
     const activated = store.upsertProfile({ ...profile, status: "active", updatedAt: now });
     store.setActiveProfileId(activated.id);
+    // Resuming a session should always clear a leftover kill switch so Send works again.
+    if (store.isHalted()) store.setSystemHalt(false);
     if (activated.kind === "user_wallet") {
       store.setAccount({
         accountId: activated.accountId,
@@ -662,6 +664,7 @@ export const createApp = (
   });
   app.post("/api/v1/system/resume", (c) => {
     store.setSystemHalt(false);
+    if (store.getState().schedule.enabled) agentScheduler.start();
     return c.json(store.getState().system);
   });
 
@@ -989,6 +992,8 @@ export const createApp = (
           autonomyMode: 4,
           updatedAt: now,
         });
+        // Fresh autonomous onboarding must not inherit a previous kill-switch lock.
+        if (store.isHalted()) store.setSystemHalt(false);
         store.updateSchedule({ enabled: true, autonomousTrading: true });
         agentScheduler.start();
         if (body.objective) {
@@ -1027,6 +1032,7 @@ export const createApp = (
         });
       }
       store.setActiveProfileId(profile.id);
+      if (store.isHalted()) store.setSystemHalt(false);
       store.updateSchedule({
         enabled: body.autonomyMode >= 2,
         autonomousTrading: false,

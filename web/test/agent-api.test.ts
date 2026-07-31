@@ -44,4 +44,28 @@ describe("agent API client", () => {
     expect(dashboard.activeProfileId).toBe("user-wallet-0.0.2");
     expect(dashboard.profiles?.some((profile) => profile.id === "user-wallet-0.0.1")).toBe(true);
   });
+
+  it("ignores a stale paused local preference when another session is active", async () => {
+    setPreferredProfileId("user-wallet-0.0.1");
+    const profiles = [
+      { id: "user-wallet-0.0.1", name: "Wallet 1", kind: "user_wallet", accountId: "0.0.1", status: "paused", network: "hedera:testnet" },
+      { id: "agent-managed", name: "Autonomous agent", kind: "agent_managed", accountId: "0.0.9", status: "active", network: "hedera:testnet", autonomyMode: 4 },
+    ];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/profiles")) {
+        return new Response(JSON.stringify({ profiles, activeProfileId: "agent-managed" }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/dashboard")) {
+        return new Response(JSON.stringify({ profile: profiles[1], events: [], runs: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/graph")) return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.includes("/receipts")) return new Response(JSON.stringify({ receipts: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    const dashboard = await loadDashboard();
+    expect(dashboard.profile?.id).toBe("agent-managed");
+    expect(dashboard.activeProfileId).toBe("agent-managed");
+  });
 });

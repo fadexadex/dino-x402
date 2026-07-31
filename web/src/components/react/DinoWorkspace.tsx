@@ -621,11 +621,25 @@ export function DinoWorkspace() {
               <div className="shrink-0 border-t border-line bg-paper px-5 py-3">
                 <div className="mx-auto w-full max-w-3xl">
                   {rightNowPlacement === "Above composer" && <div className="mb-3">{rightNow}</div>}
-                  <Composer onSend={(objective) => { void onSend(objective); }} disabled={run.halted || !profile || sending} accountLabel={profile?.accountId ? `${profile.accountId} · ${profile.network ?? "testnet"}` : undefined} />
+                  {run.halted && run.connected && (
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-orange/30 bg-card px-3 py-2.5">
+                      <p className="text-[12.5px] text-ink-2">
+                        Everything is halted. Resume to send a check-in or let the schedule run.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => void run.resume()}
+                        className="rounded-control bg-ink px-3 py-1.5 text-[12px] font-medium text-background"
+                      >
+                        Resume everything
+                      </button>
+                    </div>
+                  )}
+                  <Composer onSend={(objective) => { void onSend(objective); }} disabled={run.halted || !run.connected || !profile || sending} accountLabel={profile?.accountId ? `${profile.accountId} · ${profile.network ?? "testnet"}` : undefined} />
                   <p className="mt-2 text-[11px] text-ink-3">
                     Mode {mode} · every paid read and every trade is on-chain and inspectable ·{" "}
                     <a href="/connect" className="animated-underline text-ink-2">
-                      wallet
+                      change setup
                     </a>
                   </p>
                 </div>

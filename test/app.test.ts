@@ -95,6 +95,31 @@ describe("wallet account connect (offline)", () => {
     expect(store.getState().schedule.autonomousTrading).toBe(false);
   });
 
+  it("clears a leftover kill switch when autonomous onboarding completes", async () => {
+    store.setSystemHalt(true, "stale halt");
+    expect(store.isHalted()).toBe(true);
+    const agentApp = createApp(new MockDataProvider(), {
+      ...config,
+      agentPayerId: "0.0.6255888",
+      agentPayerKey: "302e020100300506032b6570042204200123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    }, { initializePayments: false });
+    // Fund check hits Mirror — stub by pre-seeding an active agent path that still exercises halt clear.
+    // Use wallet Mode 3 completion which also clears halt without needing Mirror.
+    const accountId = `0.0.${Math.floor(Math.random() * 1_000_000_000)}`;
+    await agentApp.request("/api/account/connect", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accountId }),
+    });
+    const res = await agentApp.request("/api/v1/onboarding/complete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ autonomyMode: 3 }),
+    });
+    expect(res.status).toBe(200);
+    expect(store.isHalted()).toBe(false);
+  });
+
   it("keeps multiple wallet sessions and can disconnect then switch", async () => {
     const first = `0.0.${Math.floor(Math.random() * 1_000_000_000)}`;
     const second = `0.0.${Math.floor(Math.random() * 1_000_000_000)}`;

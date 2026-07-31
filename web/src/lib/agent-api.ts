@@ -137,12 +137,17 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 function pickProfile(list: PortfolioProfile[], preferredId?: string | null, serverActiveId?: string | null): PortfolioProfile | undefined {
   const visible = list.filter((item) => item.id !== "connected-wallet");
   const pool = visible.length ? visible : list;
+  const preferred = preferredId ? pool.find((item) => item.id === preferredId) : undefined;
+  const serverActive = serverActiveId ? pool.find((item) => item.id === serverActiveId) : undefined;
+  // Never let a stale paused local preference win over a live active session.
+  if (preferred?.status === "active") return preferred;
+  if (serverActive?.status === "active") return serverActive;
   return (
-    (preferredId ? pool.find((item) => item.id === preferredId) : undefined) ??
-    (serverActiveId ? pool.find((item) => item.id === serverActiveId) : undefined) ??
     pool.find((item) => item.status === "active") ??
     pool.find((item) => item.kind === "agent_managed" && item.status === "active") ??
     pool.find((item) => item.kind === "user_wallet" && item.status === "active") ??
+    preferred ??
+    serverActive ??
     pool.find((item) => item.kind === "user_wallet") ??
     pool.find((item) => item.kind === "agent_managed") ??
     pool[0]
