@@ -50,14 +50,22 @@ paths is a re-onboard, because each uses a different account.
 
 ## Paying with an agent
 
-An AI agent can buy a resource autonomously while the payer key stays in the server-side
-signing process. Two ways:
+In the live product path (UI / `POST …/runs`), the API server loads `HEDERA_CLIENT_KEY`
+from the root `.env` and signs the 402 challenge in-process. There is no separate signer
+service and no second env file. The LLM never sees the key.
 
-- **Inside this repo** — use `scripts/x402-sign.ts` directly; see
-  [Paying as an agent (delegated signing)](#paying-as-an-agent-delegated-signing)
+An external AI agent can also buy a resource over plain HTTP while the private key stays
+out of its context. Two ways:
+
+- **Inside this repo** — use `scripts/x402-sign.ts` (optional CLI helper for smoke tests /
+  `npm run e2e`); see [Paying as an agent (delegated signing)](#paying-as-an-agent-delegated-signing)
   for the manual `402 → sign → 200` flow.
 - **From anywhere** — use the Hiero CLI via the `hedera-skills` skill; see
   [Paying via the Hiero CLI skill](#paying-via-the-hiero-cli-skill).
+
+In both CLI cases the key lives only in `.env`, read by the signer process — never the
+agent/LLM. `x402-sign.ts` is not a second signer identity; it uses the same
+`HEDERA_CLIENT_*` credentials the server uses.
 
 The local signer is fail-closed: it checks x402 version, resource origin, network, asset,
 receiver, and maximum atomic amount before creating a payment. No private key or payment
@@ -65,7 +73,8 @@ signature is returned by the agent API.
 
 The same root `.env` credentials (`HEDERA_CLIENT_ID` / `HEDERA_CLIENT_KEY`) are used for:
 
-1. **x402 data purchases** — signed inside the API process (or via `x402-sign.ts` for CLI).
+1. **x402 data purchases** — signed inside the API process (product path), or via
+   `x402-sign.ts` for CLI smoke tests.
 2. **Mode 4 swaps** — signed by the server with that dedicated agent account.
 3. **Mode 3 swaps** — signed in the browser wallet instead; the server key is not used.
 
@@ -122,7 +131,7 @@ Swap data source: one line in `src/providers/index.ts`.
 Swap facilitator: change `FACILITATOR_URL`.
 
 ```text
-marketrail-x402/
+dino-x402/
 ├── README.md
 ├── package.json
 ├── .env.example
@@ -237,9 +246,11 @@ return HTTP 402; after settlement the shop fetches CoinGecko and unlocks the pay
 
 ## Paying as an agent (delegated signing)
 
-`scripts/x402-sign.ts` is a standalone signer so an agent can drive the payment over plain
-HTTP while the private key stays in a separate local process. The agent runs the HTTP flow;
-the script validates the challenge against the configured policy and only then signs.
+`scripts/x402-sign.ts` is an optional manual helper for CLI smoke tests (including
+`npm run e2e`). An external agent can drive the payment over plain HTTP while the private
+key stays in a separate local process that reads the same root `.env`. The agent runs the
+HTTP flow; the script validates the challenge against the configured policy and only then
+signs. It is not a second signer identity.
 
 - **stdin** ← value of the `payment-required` header from the 402 response
 - **stdout** → value of the `payment-signature` header to retry with
