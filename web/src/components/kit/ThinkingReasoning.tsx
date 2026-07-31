@@ -8,10 +8,15 @@ export function ThinkingReasoning({
   sentences,
   working,
   startedAt,
+  resetKey,
+  placeholder = "Reading the request and gathering live market context…",
 }: {
   sentences: string[];
   working: boolean;
   startedAt?: number;
+  /** Changes when a new run starts so prior thoughts never ghost under “Thinking…”. */
+  resetKey?: string | null;
+  placeholder?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [fade, setFade] = useState({ top: false, bottom: true });
@@ -19,11 +24,21 @@ export function ThinkingReasoning({
   const viewportRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
   const seenRef = useRef(0);
+  const resetToken = resetKey ?? "idle";
 
   const done = !working;
   const expanded = done ? open : true;
 
   const [frozenElapsed, setFrozenElapsed] = useState<number | null>(null);
+  useEffect(() => {
+    // Hard reset whenever the active run changes — clears faded leftovers.
+    seenRef.current = 0;
+    setVisibleCount(0);
+    setOpen(false);
+    setFrozenElapsed(null);
+    setFade({ top: false, bottom: true });
+  }, [resetToken]);
+
   useEffect(() => {
     if (done && frozenElapsed === null) {
       setFrozenElapsed(Math.max(1, Math.round((Date.now() - (startedAt ?? Date.now())) / 1000)));
@@ -38,16 +53,10 @@ export function ThinkingReasoning({
       return;
     }
     let cancelled = false;
-    const reveal = () => {
-      if (cancelled) return;
-      setVisibleCount((count) => {
-        if (count >= sentences.length) return count;
-        return count + 1;
-      });
-    };
     // Show anything already buffered immediately, then ease in the rest.
-    setVisibleCount((count) => Math.max(count, Math.min(sentences.length, seenRef.current || 1)));
+    setVisibleCount((count) => Math.max(count, Math.min(sentences.length, Math.max(seenRef.current, 1))));
     const id = window.setInterval(() => {
+      if (cancelled) return;
       setVisibleCount((count) => {
         if (count >= sentences.length) {
           window.clearInterval(id);
@@ -56,12 +65,11 @@ export function ThinkingReasoning({
         return count + 1;
       });
     }, 140);
-    reveal();
     return () => {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [sentences.length]);
+  }, [sentences.length, resetToken]);
 
   useEffect(() => {
     seenRef.current = Math.max(seenRef.current, visibleCount);
@@ -81,11 +89,12 @@ export function ThinkingReasoning({
   const [measuredH, setMeasuredH] = useState(0);
   useLayoutEffect(() => {
     setMeasuredH(streamRef.current?.scrollHeight ?? 0);
-  }, [shown.length, expanded]);
+  }, [shown.length, expanded, working, placeholder]);
 
   const height = measuredH;
-  const capped = height > MAX_H;
-  const viewH = capped ? MAX_H : Math.max(height, working ? 28 : 0);
+  const capped = height > MAX_H && shown.length > 0;
+  // Keep a readable floor while waiting for the first sentence — never a blank strip.
+  const viewH = capped ? MAX_H : Math.max(height, working && shown.length === 0 ? 44 : working ? 28 : 0);
   const scrollable = done && open;
   const FADE = 18;
   const translate = scrollable ? 0 : capped ? MAX_H - FADE - height : 0;
@@ -210,8 +219,11 @@ export function ThinkingReasoning({
                 </p>
               ))}
               {working && shown.length === 0 && (
-                <p className="m-0 text-[13px] leading-5 text-ink-3" style={{ animation: "fade-in 300ms ease both" }}>
-                  Gathering CoinGecko context…
+                <p
+                  className="m-0 text-[13px] leading-[1.45] font-[425] tracking-[-0.005em] text-ink-2"
+                  style={{ animation: "fade-in 300ms ease both" }}
+                >
+                  {placeholder}
                 </p>
               )}
             </div>

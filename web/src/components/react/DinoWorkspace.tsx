@@ -51,7 +51,10 @@ export function DinoWorkspace() {
   const stickToBottom = useRef(true);
   const proposal = data?.pendingProposals?.[0] ?? data?.proposals?.[0];
   const waitingRunId = data?.runs?.find((item) => item.status === "waiting_approval")?.id;
-  const latestRunId = waitingRunId ?? data?.runs?.[0]?.id;
+  const runningRunId = data?.runs?.find((item) => item.status === "running")?.id;
+  const latestRunId = waitingRunId ?? runningRunId ?? data?.runs?.[0]?.id;
+  // While a new check-in is starting, never paint the previous run's thoughts under “Thinking…”.
+  const thoughtRunId = runningRunId ?? (sending ? null : waitingRunId ?? data?.runs?.[0]?.id ?? null);
   // Prefer curated titles from the server; drop bare "trade rejected" audit leftovers.
   const visibleEvents = (data?.events ?? []).filter((event) => {
     if (!isUserFacingKind(event.kind)) return false;
@@ -64,12 +67,14 @@ export function DinoWorkspace() {
   const receipts = data?.receipts ?? [];
   const baseEvents = useMemo(() => rawEvents.map((event) => toEvent(event, receipts)), [rawEvents, receipts]);
   const thoughtSentences = useMemo(
-    () =>
-      rawEvents
-        .filter((event) => event.kind === "agent.thinking")
+    () => {
+      if (!thoughtRunId) return [];
+      return visibleEvents
+        .filter((event) => event.runId === thoughtRunId && event.kind === "agent.thinking")
         .map((event) => event.detail || event.title || "")
-        .filter(Boolean) as string[],
-    [rawEvents],
+        .filter(Boolean) as string[];
+    },
+    [visibleEvents, thoughtRunId],
   );
   const serverUserTexts = useMemo(
     () =>
@@ -268,6 +273,8 @@ export function DinoWorkspace() {
       sentences={thoughtSentences}
       working={working}
       startedAt={thoughtStartedAt ?? undefined}
+      resetKey={thoughtRunId ?? (sending ? "sending" : "idle")}
+      placeholder="Reading the request and gathering live market context…"
     />
   ) : (
     <ThinkingTrace
@@ -522,6 +529,8 @@ export function DinoWorkspace() {
                               sentences={item.sentences}
                               working={item.working}
                               startedAt={item.startedAt}
+                              resetKey={item.id}
+                              placeholder="Reading the request and gathering live market context…"
                             />
                           </div>
                         );
