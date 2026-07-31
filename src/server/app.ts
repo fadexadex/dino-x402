@@ -174,6 +174,7 @@ export const createApp = (
               toToken: trade.quote.toToken,
               amountIn: trade.quote.amountIn.toString(),
               expectedAmountOut: trade.quote.expectedAmountOut.toString(),
+              amountInFormatted: trade.quote.amountInFormatted,
             },
           },
         },
@@ -655,14 +656,48 @@ export const createApp = (
       };
       store.updatePendingTrade(trade.id, { status: "approved", executionResult: result }, profileId);
       const run = store.getState().runs.find((item) => item.id === trade.runId);
-      if (run) store.updateRun(run.id, { status: "completed", tradeExecutions: [...run.tradeExecutions, result], completedAt: new Date().toISOString() }, profileId);
+      let portfolioAfter = run?.portfolioAfter;
+      if (run?.portfolioBefore) {
+        try {
+          const afterRaw = await readPortfolio(trade.accountId, { mirrorBaseUrl: config.mirrorNodeBaseUrl });
+          const prices = pricesUsdFromPortfolio(run.portfolioBefore);
+          const managed = ["HBAR", "USDC", "SAUCE"].map((symbol) => afterRaw.allocations.find((item) => item.symbol.toUpperCase() === symbol) ?? {
+            symbol,
+            balanceFormatted: 0,
+            usdValue: 0,
+            allocationPct: 0,
+          });
+          portfolioAfter = valuePortfolio({ ...afterRaw, allocations: managed }, prices);
+        } catch {
+          portfolioAfter = undefined;
+        }
+      }
+      if (run) {
+        store.updateRun(run.id, {
+          status: "completed",
+          tradeExecutions: [...run.tradeExecutions, result],
+          completedAt: new Date().toISOString(),
+          ...(portfolioAfter ? { portfolioAfter } : {}),
+        }, profileId);
+      }
+      store.recordSpend(0, trade.proposal.amountFormatted, profileId);
       sseBroadcaster.broadcast("trade.verified", {
         presentInUi: true,
-        title: "Trade signed in wallet",
-        detail: `Wallet submitted ${transactionId}`,
+        title: "Swap completed in your wallet",
+        detail: `Your wallet confirmed the exchange.`,
         tradeId: trade.id,
         result,
+        transactionId,
       }, { profileId, runId: trade.runId, provenance: "live" });
+      if (portfolioAfter) {
+        sseBroadcaster.broadcast("portfolio.updated", {
+          presentInUi: true,
+          title: "Portfolio refreshed after the swap",
+          detail: "Balances and mix updated from live holdings.",
+          tradeId: trade.id,
+          portfolio: portfolioAfter,
+        }, { profileId, runId: trade.runId, provenance: "live" });
+      }
       return c.json(jsonSafe({ status: "confirmed", tradeId: trade.id, execution: result }));
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : "Confirm failed" }, 502);
@@ -859,9 +894,14 @@ export const createApp = (
           updatedAt: now,
         });
         store.updateSchedule({ enabled: true, autonomousTrading: true });
+        agentScheduler.start();
         if (body.objective) {
           const previous = store.getLatestMandate(updated.id);
           if (previous) store.saveMandate({ ...previous, id: crypto.randomUUID(), version: previous.version + 1, objective: body.objective, createdAt: now });
+        }
+        // Pause any prior user-wallet profile so the dashboard prefers the agent treasury.
+        if (userWallet && userWallet.status === "active") {
+          store.upsertProfile({ ...userWallet, status: "paused", updatedAt: now });
         }
         sseBroadcaster.broadcast("profile.schedule.updated", { autonomyMode: 4 }, { profileId: updated.id });
         return c.json(jsonSafe({ profile: updated, autonomyMode: 4, custody: "agent_managed" }));
@@ -873,10 +913,15 @@ export const createApp = (
         autonomyMode: body.autonomyMode,
         updatedAt: now,
       });
+      // Keep agent treasury inactive while living in approval-gated wallet custody.
+      const agentManaged = (store.getState().profiles ?? []).find((item) => item.kind === "agent_managed" && item.status === "active");
+      if (agentManaged) store.upsertProfile({ ...agentManaged, status: "paused", updatedAt: now });
       store.updateSchedule({
         enabled: body.autonomyMode >= 2,
         autonomousTrading: false,
       });
+      if (body.autonomyMode >= 2) agentScheduler.start();
+      else agentScheduler.stop();
       if (body.objective) {
         const previous = store.getLatestMandate(profile.id);
         if (previous) store.saveMandate({ ...previous, id: crypto.randomUUID(), version: previous.version + 1, objective: body.objective, createdAt: now });

@@ -5,79 +5,59 @@ import { connectWallet, walletConfig } from "../../lib/wallet";
 
 const WALLETS = ["HashPack", "Blade", "Kabila"] as const;
 
-type Step = "connect" | "autonomy" | "fund" | "done";
-type AutonomyChoice = 1 | 2 | 3 | 4;
+type Step = "path" | "connect" | "intensity" | "fund" | "done";
+type CustodyPath = "approval" | "autonomous";
+type WalletIntensity = 1 | 2 | 3;
 
-const CHOICES: Array<{ mode: AutonomyChoice; title: string; detail: string }> = [
+const INTENSITY: Array<{ mode: WalletIntensity; title: string; detail: string }> = [
   {
     mode: 1,
-    title: "Keep track of the market",
-    detail: "Observe your connected wallet only. No advice, no trades.",
+    title: "Watch only",
+    detail: "See live balances. No market-data spend and no trades.",
   },
   {
     mode: 2,
-    title: "See what the agent would do",
-    detail: "Watch holdings and get advice. Nothing executes.",
+    title: "Advise me",
+    detail: "Agent pays for CoinGecko prices and explains what it would do — nothing executes.",
   },
   {
     mode: 3,
-    title: "Stay in the loop",
-    detail: "Agent prepares rebalances; you approve each trade before anything moves.",
-  },
-  {
-    mode: 4,
-    title: "Let the agent take full control",
-    detail: "Requires a funded agent treasury. Trades run within your limits without per-trade approval.",
+    title: "Propose, I approve",
+    detail: "Agent prepares each rebalance. Your connected wallet must approve before funds move.",
   },
 ];
 
-/** Connect → choose autonomy → (optional) fund agent treasury → workspace. */
+/**
+ * Custody is chosen once at the door:
+ * - Approval path → connect wallet → intensity 1–3
+ * - Autonomous path → fund server treasury → Mode 4
+ * Switching custody later is a re-onboard, not a mid-chat dial flip.
+ */
 export function ConnectApp() {
-  const [step, setStep] = useState<Step>("connect");
+  const [step, setStep] = useState<Step>("path");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [accountId, setAccountId] = useState<string | null>(null);
-  const [choice, setChoice] = useState<AutonomyChoice | null>(null);
+  const [path, setPath] = useState<CustodyPath | null>(null);
   const [agentAccountId, setAgentAccountId] = useState<string | null>(null);
   const [agentFunded, setAgentFunded] = useState(false);
   const [agentHbar, setAgentHbar] = useState(0);
 
   useEffect(() => {
     void api.getOnboarding().then((state) => {
-      if (state.connectedAccountId) {
-        setAccountId(state.connectedAccountId);
-        setStep(state.autonomyMode && state.autonomyMode > 1 ? "done" : "autonomy");
-      } else if (state.agentTreasury?.accountId && state.autonomyMode === 4 && state.agentTreasury.funded) {
-        setAgentAccountId(state.agentTreasury.accountId);
-        setAgentFunded(state.agentTreasury.funded);
-        setAgentHbar(state.agentTreasury.hbarFormatted);
-        setStep("done");
-      }
       if (state.agentTreasury) {
         setAgentAccountId(state.agentTreasury.accountId);
         setAgentFunded(state.agentTreasury.funded);
         setAgentHbar(state.agentTreasury.hbarFormatted);
       }
+      if (state.connectedAccountId) {
+        setAccountId(state.connectedAccountId);
+      }
+      // Always land on the custody fork so users can change setup deliberately.
+      // Prior completion is remembered only as account/treasury context.
+      setStep("path");
     }).catch(() => undefined);
   }, []);
-
-  const onAutonomousWithoutWallet = async () => {
-    setBusy(true);
-    setError(null);
-    setChoice(4);
-    try {
-      const treasury = await refreshTreasury();
-      if (!treasury?.accountId) {
-        setError("Autonomous mode needs a configured agent treasury account on the server.");
-        return;
-      }
-      setStep("fund");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load agent treasury.");
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const refreshTreasury = async () => {
     const state = await api.getOnboarding();
@@ -89,6 +69,32 @@ export function ConnectApp() {
     return state.agentTreasury;
   };
 
+  const chooseApprovalPath = () => {
+    setError(null);
+    setPath("approval");
+    setStep(accountId ? "intensity" : "connect");
+  };
+
+  const chooseAutonomousPath = async () => {
+    setBusy(true);
+    setError(null);
+    setPath("autonomous");
+    try {
+      const treasury = await refreshTreasury();
+      if (!treasury?.accountId) {
+        setError("Autonomous mode needs a configured agent treasury account on the server.");
+        setPath(null);
+        return;
+      }
+      setStep("fund");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load agent treasury.");
+      setPath(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onConnect = async () => {
     if (!walletConfig.enabled || busy) return;
     setBusy(true);
@@ -98,7 +104,7 @@ export function ConnectApp() {
       await api.connectAccount(connected, "Connected wallet");
       setAccountId(connected);
       await refreshTreasury();
-      setStep("autonomy");
+      setStep("intensity");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Wallet connection failed.");
     } finally {
@@ -106,32 +112,15 @@ export function ConnectApp() {
     }
   };
 
-  const onChoose = async (mode: AutonomyChoice) => {
-    setChoice(mode);
-    setError(null);
-    if (mode === 4) {
-      setBusy(true);
-      try {
-        const treasury = await refreshTreasury();
-        if (!treasury?.accountId) {
-          setError("Autonomous mode needs a configured agent treasury account on the server.");
-          return;
-        }
-        setStep("fund");
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not load agent treasury.");
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
+  const onChooseIntensity = async (mode: WalletIntensity) => {
     setBusy(true);
+    setError(null);
     try {
       await api.completeOnboarding(mode);
       setStep("done");
       window.location.href = "/";
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save autonomy choice.");
+      setError(err instanceof Error ? err.message : "Could not save your choice.");
     } finally {
       setBusy(false);
     }
@@ -150,28 +139,62 @@ export function ConnectApp() {
       setStep("done");
       window.location.href = "/";
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Could not enable autonomous mode.";
-      setError(message);
+      setError(err instanceof Error ? err.message : "Could not enable autonomous mode.");
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-paper px-4">
+    <main className="flex min-h-screen items-center justify-center bg-paper px-4 py-10">
       <div className="w-full max-w-md">
         <span className="flex items-center gap-2 text-ink">
           <DinoMark size={26} />
           <span className="text-[15px] font-semibold tracking-[-0.01em]">Dino Agent</span>
         </span>
 
+        {step === "path" && (
+          <>
+            <h1 className="mt-6 text-[22px] leading-tight font-semibold tracking-[-0.02em] text-ink">
+              How should money move?
+            </h1>
+            <p className="mt-2 text-[13px] leading-relaxed text-ink-2">
+              Pick custody once. You can change it later from onboarding — not mid-chat — because each path uses a different account.
+            </p>
+            <div className="mt-6 grid gap-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={chooseApprovalPath}
+                className="rounded-lg border border-line bg-card px-3.5 py-3 text-left transition-colors hover:bg-hover disabled:opacity-50"
+              >
+                <span className="text-[13px] font-medium text-ink">I approve each trade</span>
+                <span className="mt-1 block text-[12px] leading-relaxed text-ink-2">
+                  Connect your Hedera wallet. The agent may prepare swaps; nothing leaves your account until you confirm in the wallet app.
+                </span>
+              </button>
+              <button
+                type="button"
+                disabled={busy || !agentAccountId}
+                onClick={() => void chooseAutonomousPath()}
+                className="rounded-lg border border-line bg-card px-3.5 py-3 text-left transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <span className="text-[13px] font-medium text-ink">Let the agent run on its own</span>
+                <span className="mt-1 block text-[12px] leading-relaxed text-ink-2">
+                  Fund a server-managed treasury{agentAccountId ? ` (${agentAccountId})` : ""}. No WalletConnect required — trades execute within your limits.
+                </span>
+              </button>
+            </div>
+          </>
+        )}
+
         {step === "connect" && (
           <>
             <h1 className="mt-6 text-[22px] leading-tight font-semibold tracking-[-0.02em] text-ink">
-              Connect an account to begin
+              Connect your wallet
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-ink-2">
-              Connect a Hedera testnet wallet for approval-gated modes, or skip straight to the autonomous agent treasury.
+              Approval-gated mode uses the account you connect here. You will approve each trade in this same wallet.
             </p>
             <div className="mt-6 grid gap-2">
               {WALLETS.map((wallet) => (
@@ -186,38 +209,33 @@ export function ConnectApp() {
                   <span className="font-mono text-[11px] text-ink-3">{busy ? "…" : "testnet"}</span>
                 </button>
               ))}
-              <button
-                type="button"
-                disabled={busy || !agentAccountId}
-                onClick={() => void onAutonomousWithoutWallet()}
-                className="rounded-lg border border-line bg-card px-3.5 py-3 text-left transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <span className="text-[13px] font-medium text-ink">Use autonomous agent treasury</span>
-                <span className="mt-1 block text-[12px] leading-relaxed text-ink-2">
-                  No WalletConnect. Mode 4 runs against the funded server-managed treasury{agentAccountId ? ` (${agentAccountId})` : ""}.
-                </span>
-              </button>
             </div>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => { setPath(null); setStep("path"); }}
+              className="mt-3 rounded-control px-3 py-1.5 text-[12.5px] text-ink-3"
+            >
+              Back
+            </button>
           </>
         )}
 
-        {step === "autonomy" && (
+        {step === "intensity" && (
           <>
             <h1 className="mt-6 text-[22px] leading-tight font-semibold tracking-[-0.02em] text-ink">
-              How should the agent work?
+              How hands-on should it be?
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-ink-2">
-              {accountId
-                ? <>Connected as <span className="font-mono text-ink">{accountId}</span>. Money stays in your control unless you explicitly fund an agent treasury for full autonomy.</>
-                : "No user wallet connected. You can still enable Mode 4 on the funded agent treasury."}
+              Connected as <span className="font-mono text-ink">{accountId}</span>. Funds stay in your wallet unless you approve a trade.
             </p>
             <div className="mt-6 grid gap-2">
-              {CHOICES.map((item) => (
+              {INTENSITY.map((item) => (
                 <button
                   key={item.mode}
                   type="button"
                   disabled={busy}
-                  onClick={() => void onChoose(item.mode)}
+                  onClick={() => void onChooseIntensity(item.mode)}
                   className="rounded-lg border border-line bg-card px-3.5 py-3 text-left transition-colors hover:bg-hover disabled:opacity-50"
                 >
                   <span className="text-[13px] font-medium text-ink">{item.title}</span>
@@ -225,6 +243,14 @@ export function ConnectApp() {
                 </button>
               ))}
             </div>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setStep(accountId ? "path" : "connect")}
+              className="mt-3 rounded-control px-3 py-1.5 text-[12.5px] text-ink-3"
+            >
+              Back
+            </button>
           </>
         )}
 
@@ -234,14 +260,14 @@ export function ConnectApp() {
               Fund the agent treasury
             </h1>
             <p className="mt-2 text-[13px] leading-relaxed text-ink-2">
-              Autonomous execution uses a server-managed agent treasury. Only assets you send here can be traded without per-trade approval. Transfer testnet HBAR (and USDC/SAUCE if you want them managed), then continue.
+              Only assets you send here can be traded without asking you each time. Transfer testnet HBAR (and USDC/SAUCE if you want them managed), then continue.
             </p>
             <div className="mt-6 rounded-lg border border-line bg-card px-3.5 py-3">
-              <p className="text-[11px] font-medium tracking-[0.08em] text-ink-3 uppercase">Server-managed agent treasury</p>
+              <p className="text-[11px] font-medium tracking-[0.08em] text-ink-3 uppercase">Agent treasury</p>
               <p className="mt-1 break-all font-mono text-[13px] text-ink">{agentAccountId ?? "—"}</p>
               <p className="mt-2 text-[12px] text-ink-2">
                 Balance: <span className="font-mono text-ink">{agentHbar.toFixed(4)} ℏ</span>
-                {agentFunded ? " · funded" : " · waiting for funds"}
+                {agentFunded ? " · ready" : " · waiting for funds"}
               </p>
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
@@ -264,23 +290,18 @@ export function ConnectApp() {
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => { setChoice(null); setStep("autonomy"); }}
+                onClick={() => { setPath(null); setStep("path"); }}
                 className="rounded-control px-3 py-1.5 text-[12.5px] text-ink-3"
               >
                 Back
               </button>
             </div>
-            {choice === 4 && (
-              <p className="mt-4 text-[11px] leading-relaxed text-ink-2">
-                Only assets you send to the agent treasury can be traded autonomously. Your connected wallet remains separate.
-              </p>
-            )}
           </>
         )}
 
         {step === "done" && (
           <div className="mt-6 rounded-lg border border-line bg-card px-3.5 py-3">
-            <p className="text-[13px] text-ink">Onboarding complete. Opening workspace…</p>
+            <p className="text-[13px] text-ink">Setup complete. Opening workspace…</p>
             <a href="/" className="mt-3 inline-flex text-[12.5px] text-ink-2">Open workspace →</a>
           </div>
         )}
@@ -292,9 +313,11 @@ export function ConnectApp() {
         )}
 
         <p className="mt-4 text-[11px] leading-relaxed text-ink-2">
-          {walletConfig.enabled
-            ? "WalletConnect is ready for Hedera testnet. HashPack and Kabila appear in the QR / extension modal."
-            : "WalletConnect is not enabled in this deployment. Set PUBLIC_REOWN_PROJECT_ID to enable connection."}
+          {path === "approval" || step === "connect" || step === "intensity"
+            ? walletConfig.enabled
+              ? "WalletConnect is ready for Hedera testnet. HashPack and Kabila appear in the QR / extension modal."
+              : "WalletConnect is not enabled. Set PUBLIC_REOWN_PROJECT_ID to connect a wallet."
+            : "Autonomous mode does not need WalletConnect — it uses the funded agent treasury on the server."}
         </p>
         <a href="/" className="animated-underline mt-4 inline-block text-[12.5px] text-ink-2">
           Return to workspace →

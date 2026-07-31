@@ -151,7 +151,7 @@ export const api = {
       contractId: string;
       encodedParameters: string;
       amountTinybar: string;
-      quote: { fromSymbol: string; toSymbol: string; fromToken: string; toToken: string };
+      quote: { fromSymbol: string; toSymbol: string; fromToken: string; toToken: string; amountIn?: string };
     };
   }>(`/proposals/${proposalId}/approve`, { method: "POST" }),
   confirmProposal: (proposalId: string, transactionId: string) => request(`/proposals/${proposalId}/confirm`, { method: "POST", body: JSON.stringify({ transactionId }) }),

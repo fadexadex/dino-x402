@@ -37,6 +37,7 @@ export function DinoWorkspace() {
   const [inspector, setInspector] = useState<InspectorView | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [approving, setApproving] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [localUserMessages, setLocalUserMessages] = useState<Array<{ id: string; at: number; text: string }>>([]);
   const [thoughtStartedAt, setThoughtStartedAt] = useState<number | null>(null);
@@ -93,18 +94,42 @@ export function DinoWorkspace() {
     connect: refresh,
     disconnect: refresh,
     approve: async () => {
-      if (!proposal) return;
+      if (!proposal || approving) return;
+      setApproving(true);
+      setSendError(null);
       try {
         const result = await api.approve(proposal.id);
-        if (result?.status === "needs_wallet_signature" && result.signing && result.accountId) {
+        if (result?.status === "needs_wallet_signature") {
+          if (!result.signing || !result.accountId) {
+            throw new Error("Server asked for a wallet signature but did not return signing details.");
+          }
+          setSendError("Opening your wallet — approve the association / spend / swap prompts to finish.");
           const { transactionId } = await signAndExecuteSwap(result.accountId, result.signing);
           await api.confirmProposal(proposal.id, transactionId);
+          setSendError(null);
+        } else if (result?.status && result.status !== "approved") {
+          throw new Error(result.message || `Unexpected approve status: ${result.status}`);
         }
+      } catch (err) {
+        setSendError(err instanceof Error ? err.message : "Could not approve the trade in your wallet.");
       } finally {
+        setApproving(false);
         await refresh();
       }
     },
-    decline: async () => { if (proposal) { await api.reject(proposal.id); await refresh(); } },
+    decline: async () => {
+      if (!proposal || approving) return;
+      setApproving(true);
+      setSendError(null);
+      try {
+        await api.reject(proposal.id);
+      } catch (err) {
+        setSendError(err instanceof Error ? err.message : "Could not decline the proposal.");
+      } finally {
+        setApproving(false);
+        await refresh();
+      }
+    },
     halt: async () => { await api.halt(); await refresh(); },
     resume: async () => { await api.resume(); await refresh(); },
   };
@@ -312,7 +337,7 @@ export function DinoWorkspace() {
         <button
           type="button"
           onClick={() => { window.location.href = "/connect"; }}
-          className="hidden items-center gap-1.5 rounded-full border border-line bg-card px-2.5 py-1 font-mono text-[11px] text-ink-3 transition-colors hover:bg-hover sm:flex"
+          className="flex items-center gap-1.5 rounded-full border border-line bg-card px-2.5 py-1 font-mono text-[11px] text-ink-3 transition-colors hover:bg-hover"
         >
           <span className={`size-1.5 rounded-full ${run.connected ? "bg-green" : "bg-ink-3"}`} />
           {run.connected ? `${profile?.accountId} · ${profile?.network ?? "testnet"}` : "connect wallet"}
@@ -406,10 +431,40 @@ export function DinoWorkspace() {
                     <AutonomyDial
                       mode={mode}
                       limits={limits}
-                      onChange={(next) => { setMode(next); if (profile) void api.setSchedule(profile.id, Math.round(cadenceMs / 60_000), paused, next).then(refresh); }}
+                      custody={profile?.kind === "agent_managed" ? "agent_managed" : "user_wallet"}
+                      onChange={(next) => {
+                        if (profile?.kind !== "agent_managed" && next === 4) {
+                          window.location.href = "/connect";
+                          return;
+                        }
+                        if (profile?.kind === "agent_managed" && next !== 4) {
+                          window.location.href = "/connect";
+                          return;
+                        }
+                        setMode(next);
+                        if (profile) void api.setSchedule(profile.id, Math.round(cadenceMs / 60_000), paused, next).then(refresh).catch((err) => {
+                          setSendError(err instanceof Error ? err.message : "Could not update autonomy mode.");
+                        });
+                      }}
                       onLimitsChange={(next) => { setLimits(next); if (profile) void api.updateMandate(profile.id, { risk: { maxTradeUsd: next.maxPerTrade, maxTradesPerDay: next.maxTradesPerDay, maxPortfolioMovePct: next.maxPortfolioMovePct, maxDailyDataHbar: next.maxDailySpend, allowList: next.allowList } }).then(refresh); }}
                     />
                     {rightNowPlacement === "Inline card" && rightNowCard}
+                  </section>
+
+                  {/* Mobile holdings strip — desktop uses the left rail. */}
+                  <section className="rounded-lg border border-line bg-card p-3 lg:hidden">
+                    <p className="text-[10.5px] font-medium tracking-[0.09em] text-ink-3 uppercase">Holdings</p>
+                    <ul className="mt-2 grid grid-cols-3 gap-2">
+                      {toHoldings(data?.portfolio).slice(0, 3).map((holding) => (
+                        <li key={holding.asset} className="min-w-0">
+                          <p className="text-[11px] text-ink-2">{holding.asset}</p>
+                          <p className="truncate font-mono text-[12px] text-ink tabular-nums">{holding.amount.toFixed(holding.asset === "HBAR" ? 2 : 2)}</p>
+                        </li>
+                      ))}
+                      {toHoldings(data?.portfolio).length === 0 && (
+                        <li className="col-span-3 text-[12px] text-ink-3">No live balances yet.</li>
+                      )}
+                    </ul>
                   </section>
 
                   {(error || sendError) && <section role="alert" className="rounded-lg border border-orange/30 bg-orange-soft p-3 text-[12px] text-orange">{sendError ?? error}</section>}
@@ -419,6 +474,7 @@ export function DinoWorkspace() {
                       <div className="mt-2">
                         <ProposalGate
                           proposal={toProposal(proposal)}
+                          busy={approving}
                           onApprove={() => void run.approve()}
                           onDecline={() => void run.decline()}
                         />

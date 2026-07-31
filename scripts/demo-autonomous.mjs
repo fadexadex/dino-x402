@@ -11,7 +11,7 @@ mkdirSync(`${OUT}/demo-frames`, { recursive: true });
 
 const BASE = process.env.DEMO_URL ?? "http://localhost:4321";
 const OBJECTIVE =
-  "Run another autonomous check-in. Show me your thoughts while you buy HBAR/USDC/SAUCE intelligence and judge the bands.";
+  "Run another autonomous check-in. Show me your thoughts while you buy HBAR/USDC/SAUCE market data and judge the mix.";
 
 const browser = await chromium.launch({
   headless: true,
@@ -31,6 +31,11 @@ const shot = async (name) => {
 const bodyText = async () => page.locator("body").innerText();
 
 try {
+  // Also capture onboarding fork for the recording.
+  await page.goto(`${BASE}/connect`, { waitUntil: "networkidle", timeout: 60_000 });
+  await page.waitForTimeout(1200);
+  await shot("00-onboarding-custody");
+
   await page.request.post(`${BASE}/api/v1/onboarding/complete`, {
     data: {
       autonomyMode: 4,
@@ -42,7 +47,13 @@ try {
   await page.waitForTimeout(2000);
   await shot("01-workspace-loaded");
 
-  // Show prior graph data if present.
+  // Mobile-ish responsive check.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForTimeout(800);
+  await shot("01b-mobile-workspace");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForTimeout(600);
+
   const graphBtn = page.getByRole("button", { name: /^Graph$/i });
   if (await graphBtn.isVisible().catch(() => false)) {
     await graphBtn.click();
@@ -60,39 +71,32 @@ try {
   await page.getByText(OBJECTIVE.slice(0, 32), { exact: false }).first().waitFor({ timeout: 15_000 });
   await shot("04-user-message-visible");
 
-  await page.getByText(/Thinking|Buying|Reading live portfolio/i).first().waitFor({ timeout: 60_000 });
+  await page.getByText(/Thinking|Paying for|Checking your live balances|Buy market data/i).first().waitFor({ timeout: 60_000 });
   await shot("05-thinking-started");
 
   const deadline = Date.now() + 300_000;
   let phase = "start";
   while (Date.now() < deadline) {
     const text = await bodyText();
-    if (phase === "start" && /Buying .* intelligence|paid signal|x402/i.test(text)) {
+    if (phase === "start" && /Paying for .* market data|Buying .* intelligence|market data unlocked|x402/i.test(text)) {
       phase = "buying";
       await shot("06-buying-intelligence");
     }
-    if ((phase === "buying" || phase === "start") && /payment verified|HBAR payment verified/i.test(text)) {
+    if ((phase === "buying" || phase === "start") && /market data unlocked|payment verified|Payment confirmed/i.test(text)) {
       phase = "settled";
       await shot("07-payment-settled");
     }
-    if (/Deterministic portfolio evaluation|Trade proposed|Trade verified|bands look healthy|Trade blocked|Trade skipped/i.test(text)) {
+    if (/Comparing your mix|Ready to rebalance|Swap completed|bands look healthy|Rebalance held|Trade blocked|no rebalance/i.test(text)) {
       phase = "analyzed";
       await shot("08-analysis");
     }
-    // True completion: thought summary OR verified/no-action outcome and not "Thinking…"
-    const done =
-      (/Thought for \d+s/i.test(text) || /Trade verified on Hedera|bands look healthy|Observe-only check-in complete|Run stopped safely/i.test(text)) &&
-      !/Buying (HBAR|USDC|SAUCE) intelligence/i.test(text) &&
-      !/\brunning\b/i.test(await page.locator("text=/running/i").first().innerText().catch(() => ""));
-    // Prefer API truth.
     const api = await page.request.get(`${BASE}/api/v1/profiles/agent-managed/dashboard`);
     const dash = await api.json();
     const status = dash?.runs?.[0]?.status;
     if (status && status !== "running") {
-      console.log("run status", status);
+      console.log("run status", status, "portfolioAfter", Boolean(dash?.runs?.[0]?.portfolioAfter));
       break;
     }
-    if (done && phase === "analyzed") break;
     await page.waitForTimeout(2500);
   }
 
@@ -100,7 +104,7 @@ try {
   await shot("09-run-complete");
 
   if (await graphBtn.isVisible().catch(() => false)) {
-    const graphVisible = await page.getByText(/HBAR \/ USDC|paid feed/i).first().isVisible().catch(() => false);
+    const graphVisible = await page.getByText(/HBAR \/ USDC|paid feed|Portfolio/i).first().isVisible().catch(() => false);
     if (!graphVisible) await graphBtn.click().catch(() => undefined);
     await page.waitForTimeout(1500);
   }
@@ -113,7 +117,6 @@ try {
     await shot("11-thoughts-expanded");
   }
 
-  // Scroll activity stream to show user bubble + steps.
   await page.evaluate(() => {
     const main = document.querySelector("main .overflow-auto");
     if (main) main.scrollTop = 0;
@@ -121,11 +124,17 @@ try {
   await page.waitForTimeout(800);
   await shot("12-stream-top");
 
-  console.log("demo finished ok");
+  const dash = await page.request.get(`${BASE}/api/v1/profiles/agent-managed/dashboard`).then((r) => r.json());
+  console.log(JSON.stringify({
+    runStatus: dash?.runs?.[0]?.status,
+    hasPortfolioAfter: Boolean(dash?.runs?.[0]?.portfolioAfter),
+    assets: dash?.portfolio?.assets?.map((a) => ({ symbol: a.symbol, balance: a.balance, pct: a.allocationPct })),
+    eventKinds: (dash?.events ?? []).slice(-12).map((e) => e.kind),
+  }, null, 2));
 } catch (error) {
-  await shot("error-state");
   console.error(error);
-  process.exitCode = 1;
+  await shot("error");
+  throw error;
 } finally {
   const video = page.video();
   await context.close();
@@ -135,7 +144,7 @@ try {
     const dest = `${OUT}/dino-autonomous-demo.webm`;
     if (existsSync(path)) {
       try { renameSync(path, dest); } catch { copyFileSync(path, dest); }
-      console.log(`video ${dest}`);
+      console.log("video", dest);
     }
   }
 }
