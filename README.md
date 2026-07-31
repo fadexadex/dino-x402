@@ -2,7 +2,7 @@
 
 An AI portfolio agent that **pays for live market data one call at a time**, settles those payments on **Hedera testnet**, and helps you keep a small HBAR / USDC / SAUCE mix on track.
 
-“Managing the portfolio” here means: **watch holdings → buy fresh prices when needed → explain what changed → decide whether to hold or rebalance** (and only then trade, if your mode allows it). Rebalancing is one possible outcome, not the only job.
+“Managing the portfolio” here means: **watch holdings → buy fresh prices when needed → explain what changed → decide whether to hold or rebalance** (and only then trade, if your mode allows it).
 
 Built from the Hedera x402 “agent pays per query” starting point.
 
