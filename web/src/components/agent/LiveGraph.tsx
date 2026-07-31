@@ -54,12 +54,17 @@ function useStickyPriceDomain(ticks: Tick[]): [number, number] {
   return next;
 }
 
+/** Pads a single observation so markers / focus lines from the same run still land on-canvas. */
+const SINGLE_TICK_PAD_MS = 5 * 60_000;
+
 function usePaths(ticks: Tick[], height: number, domainP: [number, number]) {
   return useMemo(() => {
-    if (ticks.length < 2) return null;
+    if (ticks.length < 1) return null;
     const xs = ticks.map((d) => d.t);
-    const minT = Math.min(...xs);
-    const maxT = Math.max(...xs);
+    const rawMin = Math.min(...xs);
+    const rawMax = Math.max(...xs);
+    const minT = ticks.length === 1 ? rawMin - SINGLE_TICK_PAD_MS : rawMin;
+    const maxT = ticks.length === 1 ? rawMax + SINGLE_TICK_PAD_MS : rawMax;
     const minP = domainP[0];
     const maxP = domainP[1];
     const x = (t: number) => ((t - minT) / Math.max(1, maxT - minT)) * W;
@@ -92,7 +97,7 @@ function usePaths(ticks: Tick[], height: number, domainP: [number, number]) {
 
     const gaps = ticks.filter((d) => d.provenance === "fallback").map((d) => x(d.t));
 
-    return { x, y, segments, areas, gaps, minT, maxT, minP, maxP };
+    return { x, y, segments, areas, gaps, minT, maxT, minP, maxP, single: ticks.length === 1 };
   }, [ticks, height, domainP]);
 }
 
@@ -314,6 +319,17 @@ function Frame({
                   vectorEffect="non-scaling-stroke"
                 />
               ))}
+              {p.single && ticks[0] && (
+                <circle
+                  cx={p.x(ticks[0].t)}
+                  cy={p.y(ticks[0].price)}
+                  r={5}
+                  fill="var(--signal)"
+                  stroke="var(--card)"
+                  strokeWidth="2"
+                  vectorEffect="non-scaling-stroke"
+                />
+              )}
             </>
           )}
           {showComposition && <CompositionSteps markers={markers} x={p.x} weights={weights} />}
@@ -518,7 +534,8 @@ function GraphHeader({
   const shown = selected ?? last;
   const first = ticks[0];
   if (!shown || !first) return null;
-  const delta = ((shown.price - first.price) / first.price) * 100;
+  const single = ticks.length === 1;
+  const delta = single ? 0 : ((shown.price - first.price) / first.price) * 100;
   const up = delta >= 0;
   return (
     <div className="px-5 pt-4">
@@ -530,15 +547,23 @@ function GraphHeader({
           <span className="font-mono text-[26px] leading-none font-medium text-ink tabular-nums">
             {shown.price.toFixed(5)}
           </span>
-          <span
-            className={`inline-block min-w-[62px] font-mono text-[12px] tabular-nums ${up ? "text-green" : "text-orange"}`}
-          >
-            {up ? "+" : ""}
-            {delta.toFixed(2)}%
-          </span>
+          {single ? (
+            <span className="font-mono text-[12px] text-ink-3 tabular-nums">first observation</span>
+          ) : (
+            <span
+              className={`inline-block min-w-[62px] font-mono text-[12px] tabular-nums ${up ? "text-green" : "text-orange"}`}
+            >
+              {up ? "+" : ""}
+              {delta.toFixed(2)}%
+            </span>
+          )}
         </div>
         <p className="mt-1 font-mono text-[11px] text-ink-3 tabular-nums">
-          {selected ? `${clock(selected.t)} · selected` : `${clock(shown.t)} · latest`}
+          {single
+            ? `${clock(shown.t)} · verified tick · run again to draw the feed`
+            : selected
+              ? `${clock(selected.t)} · selected`
+              : `${clock(shown.t)} · latest`}
         </p>
       </div>
       {children && <div className="mt-3">{children}</div>}
@@ -583,7 +608,11 @@ export function LiveGraph({
     return out.length > 2 ? out : ticks;
   }, [ticks, domain, range]);
 
-  const inView = (t: number) => view.length > 0 && t >= view[0]!.t && t <= view[view.length - 1]!.t;
+  const viewMin = view[0]?.t;
+  const viewMax = view[view.length - 1]?.t;
+  const pad = view.length === 1 ? SINGLE_TICK_PAD_MS : 0;
+  const inView = (t: number) =>
+    viewMin !== undefined && viewMax !== undefined && t >= viewMin - pad && t <= viewMax + pad;
   const vMarkers = markers.filter((m) => inView(m.t));
   const vAnnotations = annotations.filter((a) => inView(a.t));
 

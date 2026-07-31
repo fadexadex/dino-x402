@@ -144,7 +144,14 @@ export function ConnectApp() {
     setBusy(true);
     setError(null);
     try {
-      await api.activateProfile(sessionId);
+      const result = await api.activateProfile(sessionId);
+      const activated = result.profile;
+      if (activated.kind === "user_wallet" && activated.accountId && walletConfig.enabled) {
+        const connected = await connectWallet({ force: true });
+        if (connected !== activated.accountId) {
+          throw new Error(`Connect wallet ${activated.accountId} to resume that session (got ${connected}).`);
+        }
+      }
       window.location.href = "/";
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not resume that session.");

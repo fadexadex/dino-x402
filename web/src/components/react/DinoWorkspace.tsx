@@ -18,7 +18,7 @@ import { useVariant, useVariants } from "@/lib/variants";
 import { api } from "@/lib/agent-api";
 import { isConclusionKind, isStreamMetaKind, isUserFacingKind, toEvent, toHoldings, toProposal } from "@/lib/agent-view";
 import { signAndExecuteSwap } from "@/lib/wallet-sign";
-import { disconnectWallet } from "@/lib/wallet";
+import { connectWallet, disconnectWallet, getConnectedAccountId, getConnector, walletConfig } from "@/lib/wallet";
 import { useAgentDashboard } from "./useAgentDashboard";
 
 type ChatItem =
@@ -110,7 +110,25 @@ export function DinoWorkspace() {
     setSessionBusy(true);
     setSendError(null);
     try {
-      await api.activateProfile(profileId);
+      const result = await api.activateProfile(profileId);
+      const activated = result.profile;
+      // Mode 3 needs the matching WalletConnect session for approve; Modes 1–2 can still observe.
+      if (activated.kind === "user_wallet" && activated.accountId && walletConfig.enabled) {
+        try {
+          const connector = await getConnector();
+          let current = getConnectedAccountId(connector);
+          if (current !== activated.accountId) {
+            current = await connectWallet({ force: Boolean(current) });
+          }
+          if (current !== activated.accountId) {
+            setSendError(`Session active for ${activated.accountId}. Connect that wallet before approving trades.`);
+          }
+        } catch {
+          if ((activated.autonomyMode ?? 1) >= 3) {
+            setSendError("Session activated. Reconnect the matching wallet before approving trades.");
+          }
+        }
+      }
       setLocalUserMessages([]);
       await refresh();
     } catch (err) {

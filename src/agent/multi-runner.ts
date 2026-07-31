@@ -5,7 +5,8 @@ import type { AgentEvent, AgentRecommendation } from "./types.js";
 import type { AgentMultiRunRecord, PendingTrade } from "../store/types.js";
 import type { SaucerSwapConfig, TradeProposal } from "../trading/types.js";
 import { readPortfolio } from "../portfolio/reader.js";
-import { proposeBandRebalance, valuePortfolio } from "../portfolio/allocation.js";
+import { proposeBandRebalance, validateAllocationBands, valuePortfolio } from "../portfolio/allocation.js";
+import type { AllocationBand } from "../portfolio/types.js";
 import { TradePolicy } from "../trading/policy.js";
 import { AgentRunner } from "./runner.js";
 import { store } from "../store/index.js";
@@ -19,11 +20,33 @@ import { insightFromPaidData, portfolioInsightNarrative, type MarketInsight } fr
 
 const ASSETS = ["HBAR", "USDC", "SAUCE"] as const;
 const MIN_TRADE_USD = 0.5;
-const DEFAULT_BANDS = [
-  { symbol: "HBAR" as const, minPct: 25, targetPct: 34, maxPct: 45 },
-  { symbol: "USDC" as const, minPct: 25, targetPct: 33, maxPct: 45 },
-  { symbol: "SAUCE" as const, minPct: 10, targetPct: 33, maxPct: 40 },
+const DEFAULT_BANDS: AllocationBand[] = [
+  { symbol: "HBAR", minPct: 25, targetPct: 34, maxPct: 45 },
+  { symbol: "USDC", minPct: 25, targetPct: 33, maxPct: 45 },
+  { symbol: "SAUCE", minPct: 10, targetPct: 33, maxPct: 40 },
 ];
+
+function bandsForProfile(profileId?: string): AllocationBand[] {
+  const mandate = profileId ? store.getLatestMandate(profileId) : null;
+  const fromMandate = mandate?.allocations
+    ?.filter((band): band is AllocationBand => ASSETS.includes(band.symbol as typeof ASSETS[number]))
+    .map((band) => ({
+      symbol: band.symbol,
+      ...(band.tokenId ? { tokenId: band.tokenId } : {}),
+      minPct: band.minPct,
+      targetPct: band.targetPct,
+      maxPct: band.maxPct,
+    }));
+  if (fromMandate && fromMandate.length === ASSETS.length) {
+    try {
+      validateAllocationBands(fromMandate);
+      return fromMandate;
+    } catch {
+      return DEFAULT_BANDS;
+    }
+  }
+  return DEFAULT_BANDS;
+}
 
 function paidSignal(data: unknown): { price?: number; provenance: "live" | "fallback" } | undefined {
   if (!data || typeof data !== "object") return undefined;
@@ -259,17 +282,7 @@ export class MultiAssetAgentRunner {
       });
       const portfolio = valuePortfolio({ ...rawPortfolio, allocations: managedAllocations }, prices);
       record.portfolioBefore = portfolio; store.updateRun(runId, { portfolioBefore: portfolio, dataPurchases: record.dataPurchases, spentDataHbar: record.spentDataHbar }, profileId);
-      const mandate = profileId ? store.getLatestMandate(profileId) : undefined;
-      const bands = (mandate?.allocations?.length ? mandate.allocations : DEFAULT_BANDS).map((band) => {
-        const tokenId = "tokenId" in band && typeof band.tokenId === "string" ? band.tokenId : undefined;
-        return {
-          symbol: band.symbol,
-          minPct: band.minPct,
-          targetPct: band.targetPct,
-          maxPct: band.maxPct,
-          ...(tokenId ? { tokenId } : {}),
-        };
-      });
+      const bands = bandsForProfile(profileId);
       think("All three paid CoinGecko reads are in. Comparing each sleeve against its allocation band next.");
       const candidate = proposeBandRebalance(portfolio.allocations, bands);
       const narrative = portfolioInsightNarrative({
@@ -287,7 +300,7 @@ export class MultiAssetAgentRunner {
         source: "deterministic",
       };
       record.recommendation = recommendation;
-      event("analysis.completed", "Comparing your mix to the target bands", recommendation.summary, { recommendation, insights });
+      event("analysis.completed", "Comparing your mix to the target bands", recommendation.summary, { recommendation, insights, candidate });
       if (mode === 2) {
         think("Mode 2 stops at advice — recording the recommendation without proposing an executable order.");
         record.status = "completed"; record.completedAt = new Date().toISOString();

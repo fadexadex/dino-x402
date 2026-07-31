@@ -90,6 +90,35 @@ describe("live portfolio and deterministic allocation", () => {
     expect(candidate.toSymbol).toBe("SAUCE");
     expect(candidate.amountUsd).toBeCloseTo(10); // 10pp ceiling excess
   });
+
+  it("proposes a target-drift rebalance when bands are still intact", () => {
+    const candidate = proposeBandRebalance([
+      { symbol: "HBAR", balanceFormatted: 34, usdValue: 34, allocationPct: 34 },
+      { symbol: "USDC", balanceFormatted: 40, usdValue: 40, allocationPct: 40 },
+      { symbol: "SAUCE", balanceFormatted: 26, usdValue: 26, allocationPct: 26 },
+    ], [
+      { symbol: "HBAR", minPct: 25, targetPct: 34, maxPct: 45 },
+      { symbol: "USDC", minPct: 25, targetPct: 33, maxPct: 45 },
+      { symbol: "SAUCE", minPct: 10, targetPct: 33, maxPct: 40 },
+    ]);
+    expect(candidate).toMatchObject({ action: "swap", fromSymbol: "USDC", toSymbol: "SAUCE" });
+    expect(candidate.amountUsd).toBeCloseTo(7, 5);
+    expect(candidate.reason).toContain("above its 33% target");
+  });
+
+  it("holds when the book is near every target", () => {
+    const candidate = proposeBandRebalance([
+      { symbol: "HBAR", balanceFormatted: 34, usdValue: 34, allocationPct: 34 },
+      { symbol: "USDC", balanceFormatted: 33, usdValue: 33, allocationPct: 33 },
+      { symbol: "SAUCE", balanceFormatted: 33, usdValue: 33, allocationPct: 33 },
+    ], [
+      { symbol: "HBAR", minPct: 25, targetPct: 34, maxPct: 45 },
+      { symbol: "USDC", minPct: 25, targetPct: 33, maxPct: 45 },
+      { symbol: "SAUCE", minPct: 10, targetPct: 33, maxPct: 40 },
+    ]);
+    expect(candidate.action).toBe("hold");
+    expect(candidate.reason).toContain("Current mix:");
+  });
 });
 
 describe("trade guardrails and SaucerSwap plans", () => {

@@ -1,5 +1,8 @@
 import type { AllocationBand, AllocationCandidate, Portfolio, PortfolioAllocation } from "./types.js";
 
+/** Minimum absolute target drift (percentage points) before a target-seeking swap is proposed. */
+export const DEFAULT_TARGET_DRIFT_PCT = 5;
+
 export function valuePortfolio(portfolio: Portfolio, pricesUsd: Readonly<Record<string, number>>): Portfolio {
   const allocations = portfolio.allocations.map((allocation) => {
     const price = pricesUsd[allocation.symbol.toUpperCase()];
@@ -84,47 +87,138 @@ export function validateAllocationBands(bands: readonly AllocationBand[]): void 
   if (Math.abs(targetTotal - 100) > 0.001) throw new Error("Allocation targets must total 100%");
 }
 
-/** Returns only the deterministic candidate; it never makes an authorization decision. */
+type BandRow = {
+  band: AllocationBand;
+  allocation?: PortfolioAllocation;
+  pct: number;
+  excessOverMax: number;
+  deficitUnderMin: number;
+  driftFromTarget: number;
+};
+
+function swapCandidate(
+  from: BandRow,
+  to: BandRow,
+  movedPctOfPortfolio: number,
+  total: number,
+  reason: string,
+): AllocationCandidate {
+  if (!from.allocation || movedPctOfPortfolio <= 0) {
+    return { action: "hold", percentage: 0, amountUsd: 0, reason: "All allocation bands are satisfied." };
+  }
+  const amountUsd = total * (movedPctOfPortfolio / 100);
+  if (amountUsd <= 0 || from.allocation.usdValue <= 0) {
+    return { action: "hold", percentage: 0, amountUsd: 0, reason: "All allocation bands are satisfied." };
+  }
+  return {
+    action: "swap",
+    fromSymbol: from.band.symbol,
+    toSymbol: to.band.symbol,
+    percentage: (amountUsd / from.allocation.usdValue) * 100,
+    amountUsd,
+    reason,
+  };
+}
+
+function holdSnapshot(rows: readonly BandRow[]): AllocationCandidate {
+  const detail = rows
+    .map((row) => `${row.band.symbol} ${row.pct.toFixed(1)}% (target ${row.band.targetPct}%, band ${row.band.minPct}–${row.band.maxPct}%)`)
+    .join("; ");
+  return {
+    action: "hold",
+    percentage: 0,
+    amountUsd: 0,
+    reason: `All allocation bands are satisfied. Current mix: ${detail}.`,
+  };
+}
+
+/**
+ * Returns only the deterministic candidate; it never makes an authorization decision.
+ *
+ * Priority:
+ * 1. Hard ceiling breach — lighten into the deepest under-floor (or under-target) sleeve.
+ * 2. Hard floor breach alone — fund from the most overweight sleeve.
+ * 3. Target drift — when one asset is ≥ drift above target and another ≥ drift below.
+ */
 export function proposeBandRebalance(
   allocations: readonly PortfolioAllocation[],
   bands: readonly AllocationBand[],
+  options: { targetDriftPct?: number } = {},
 ): AllocationCandidate {
   validateAllocationBands(bands);
   const indexed = new Map(allocations.map((item) => [item.symbol.toUpperCase(), item]));
   const total = allocations.reduce((sum, item) => sum + item.usdValue, 0);
   if (!Number.isFinite(total) || total <= 0) return { action: "hold", percentage: 0, amountUsd: 0, reason: "Portfolio has no live USD value." };
-  const over = bands
-    .map((band) => ({ band, allocation: indexed.get(band.symbol), excess: (indexed.get(band.symbol)?.allocationPct ?? 0) - band.maxPct }))
-    .filter((item) => item.excess > 0 && item.allocation)
-    .sort((a, b) => b.excess - a.excess)[0];
-  const underFloor = bands
-    .map((band) => ({ band, allocation: indexed.get(band.symbol), deficit: band.minPct - (indexed.get(band.symbol)?.allocationPct ?? 0) }))
-    .filter((item) => item.deficit > 0)
-    .sort((a, b) => b.deficit - a.deficit)[0];
-  // If nothing is under its hard floor, still lighten an over-ceiling sleeve into
-  // the sleeve furthest below its target (even when that sleeve is above minPct).
-  const underTarget = bands
-    .map((band) => ({
+
+  const rows: BandRow[] = bands.map((band) => {
+    const allocation = indexed.get(band.symbol);
+    const pct = allocation?.allocationPct ?? 0;
+    return {
       band,
-      allocation: indexed.get(band.symbol),
-      deficit: band.targetPct - (indexed.get(band.symbol)?.allocationPct ?? 0),
-    }))
-    .filter((item) => item.deficit > 0 && item.band.symbol !== over?.band.symbol)
-    .sort((a, b) => b.deficit - a.deficit)[0];
-  const under = underFloor ?? underTarget;
-  if (!over || !under || !over.allocation) return { action: "hold", percentage: 0, amountUsd: 0, reason: "All allocation bands are satisfied." };
-  // When a sleeve is over its ceiling, move toward target (not only the tiny
-  // amount needed to kiss the underweight floor). Cap by the ceiling excess.
-  const towardTargetPct = Math.max(0, over.allocation.allocationPct - over.band.targetPct);
-  const receiverNeed = underFloor ? underFloor.deficit : under.deficit;
-  const movedPct = Math.min(over.excess, Math.max(receiverNeed, towardTargetPct));
-  const amountUsd = total * (movedPct / 100);
-  const reason = underFloor
-    ? `${over.band.symbol} exceeds its ${over.band.maxPct}% ceiling while ${under.band.symbol} is below its ${under.band.minPct}% floor.`
-    : `${over.band.symbol} exceeds its ${over.band.maxPct}% ceiling; rotating toward under-target ${under.band.symbol} (${(indexed.get(under.band.symbol)?.allocationPct ?? 0).toFixed(1)}% vs ${under.band.targetPct}% target).`;
-  return {
-    action: "swap", fromSymbol: over.band.symbol, toSymbol: under.band.symbol,
-    percentage: (amountUsd / over.allocation.usdValue) * 100, amountUsd,
-    reason,
-  };
+      ...(allocation ? { allocation } : {}),
+      pct,
+      excessOverMax: pct - band.maxPct,
+      deficitUnderMin: band.minPct - pct,
+      driftFromTarget: pct - band.targetPct,
+    };
+  });
+
+  const overMax = rows
+    .filter((row) => row.excessOverMax > 0 && row.allocation)
+    .sort((a, b) => b.excessOverMax - a.excessOverMax)[0];
+  const underMin = rows
+    .filter((row) => row.deficitUnderMin > 0)
+    .sort((a, b) => b.deficitUnderMin - a.deficitUnderMin)[0];
+
+  if (overMax?.allocation) {
+    const underTarget = rows
+      .filter((row) => row.band.symbol !== overMax.band.symbol && row.driftFromTarget < 0)
+      .sort((a, b) => a.driftFromTarget - b.driftFromTarget)[0];
+    const under = underMin && underMin.band.symbol !== overMax.band.symbol ? underMin : underTarget;
+    if (under) {
+      const towardTargetPct = Math.max(0, overMax.driftFromTarget);
+      const receiverNeed = underMin && under.band.symbol === underMin.band.symbol
+        ? underMin.deficitUnderMin
+        : Math.max(0, -under.driftFromTarget);
+      const movedPct = Math.min(overMax.excessOverMax, Math.max(receiverNeed, towardTargetPct));
+      const reason = underMin && under.band.symbol === underMin.band.symbol
+        ? `${overMax.band.symbol} exceeds its ${overMax.band.maxPct}% ceiling while ${under.band.symbol} is below its ${under.band.minPct}% floor.`
+        : `${overMax.band.symbol} exceeds its ${overMax.band.maxPct}% ceiling; rotating toward under-target ${under.band.symbol} (${under.pct.toFixed(1)}% vs ${under.band.targetPct}% target).`;
+      return swapCandidate(overMax, under, movedPct, total, reason);
+    }
+  }
+
+  if (underMin) {
+    const over = rows
+      .filter((row) => row.band.symbol !== underMin.band.symbol && row.allocation)
+      .sort((a, b) => b.driftFromTarget - a.driftFromTarget)[0];
+    if (over?.allocation) {
+      return swapCandidate(
+        over,
+        underMin,
+        underMin.deficitUnderMin,
+        total,
+        `${underMin.band.symbol} is below its ${underMin.band.minPct}% floor; funding it from ${over.band.symbol}, the most overweight holding.`,
+      );
+    }
+  }
+
+  const driftPct = options.targetDriftPct ?? DEFAULT_TARGET_DRIFT_PCT;
+  const mostOver = rows
+    .filter((row) => row.allocation && row.driftFromTarget >= driftPct)
+    .sort((a, b) => b.driftFromTarget - a.driftFromTarget)[0];
+  const mostUnder = rows
+    .filter((row) => row.driftFromTarget <= -driftPct)
+    .sort((a, b) => a.driftFromTarget - b.driftFromTarget)[0];
+  if (mostOver && mostUnder && mostOver.band.symbol !== mostUnder.band.symbol) {
+    return swapCandidate(
+      mostOver,
+      mostUnder,
+      Math.min(mostOver.driftFromTarget, -mostUnder.driftFromTarget),
+      total,
+      `${mostOver.band.symbol} is ${mostOver.driftFromTarget.toFixed(1)}pp above its ${mostOver.band.targetPct}% target while ${mostUnder.band.symbol} is ${(-mostUnder.driftFromTarget).toFixed(1)}pp below its ${mostUnder.band.targetPct}% target.`,
+    );
+  }
+
+  return holdSnapshot(rows);
 }
