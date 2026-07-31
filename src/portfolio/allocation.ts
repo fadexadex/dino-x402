@@ -4,10 +4,68 @@ export function valuePortfolio(portfolio: Portfolio, pricesUsd: Readonly<Record<
   const allocations = portfolio.allocations.map((allocation) => {
     const price = pricesUsd[allocation.symbol.toUpperCase()];
     if (!Number.isFinite(price) || price === undefined || price < 0) throw new Error(`Missing live USD valuation for ${allocation.symbol}`);
-    return { ...allocation, usdValue: allocation.balanceFormatted * price };
+    return { ...allocation, usdValue: allocation.balanceFormatted * price, markPriceUsd: price };
   });
   const totalUsdValue = allocations.reduce((sum, allocation) => sum + allocation.usdValue, 0);
   return { ...portfolio, totalUsdValue, allocations: allocations.map((allocation) => ({ ...allocation, allocationPct: totalUsdValue ? allocation.usdValue / totalUsdValue * 100 : 0 })) };
+}
+
+/** Recover per-asset USD prices from a previously valued portfolio snapshot. */
+export function pricesUsdFromPortfolio(portfolio: Portfolio): Record<string, number> {
+  const prices: Record<string, number> = {};
+  for (const allocation of portfolio.allocations) {
+    const key = allocation.symbol.toUpperCase();
+    if (typeof allocation.markPriceUsd === "number" && Number.isFinite(allocation.markPriceUsd) && allocation.markPriceUsd >= 0) {
+      prices[key] = allocation.markPriceUsd;
+      continue;
+    }
+    const balance = allocation.balanceFormatted;
+    if (balance > 1e-12 && Number.isFinite(allocation.usdValue) && allocation.usdValue >= 0) {
+      prices[key] = allocation.usdValue / balance;
+    }
+  }
+  if (prices.USDC === undefined) prices.USDC = 1;
+  return prices;
+}
+
+export type LiveValuedAsset = {
+  symbol: string;
+  balance: number;
+  usdValue: number;
+  allocationPct: number;
+  provenance: string;
+};
+
+/**
+ * Keep Mirror Node balances authoritative, but revalue USD / mix % from the
+ * newest paid price snapshot (prefer post-swap valuation when present).
+ */
+export function mergeLivePortfolioValuation(
+  live: Portfolio,
+  valuation?: Portfolio,
+): { totalUsd: number; provenance: string; valued: boolean; assets: LiveValuedAsset[] } {
+  const prices = valuation ? pricesUsdFromPortfolio(valuation) : {};
+  const assets = live.allocations.map((asset) => {
+    const price = prices[asset.symbol.toUpperCase()];
+    const usdValue = price !== undefined ? asset.balanceFormatted * price : 0;
+    return {
+      symbol: asset.symbol,
+      balance: asset.balanceFormatted,
+      usdValue,
+      allocationPct: 0,
+      provenance: price !== undefined && valuation ? valuation.provenance : live.provenance,
+    };
+  });
+  const totalUsd = assets.reduce((sum, asset) => sum + asset.usdValue, 0);
+  for (const asset of assets) {
+    asset.allocationPct = totalUsd > 0 ? (asset.usdValue / totalUsd) * 100 : 0;
+  }
+  return {
+    totalUsd,
+    provenance: totalUsd > 0 && valuation ? valuation.provenance : live.provenance,
+    valued: totalUsd > 0,
+    assets,
+  };
 }
 
 export function validateAllocationBands(bands: readonly AllocationBand[]): void {

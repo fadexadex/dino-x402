@@ -17,6 +17,7 @@ export type AgentEventKind =
   | "run.completed"
   | "run.failed"
   | "portfolio.read"
+  | "portfolio.updated"
   | "trade.proposed"
   | "trade.approved"
   | "trade.submitted"

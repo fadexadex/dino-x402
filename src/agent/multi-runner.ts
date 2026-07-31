@@ -135,15 +135,15 @@ export class MultiAssetAgentRunner {
       }
       event("run.triggered", "Check-in started", objective, { objective, presentInUi: true });
       think(`Reading the request and planning a portfolio check-in for ${accountId}.`);
-      event("portfolio.read", "Reading live portfolio", `Fetching Mirror Node holdings for ${accountId}`);
+      event("portfolio.read", "Checking your live balances", `Looking up what this account currently holds on Hedera.`);
       const rawPortfolio = await readPortfolio(accountId);
       record.portfolioBefore = rawPortfolio; store.updateRun(runId, { portfolioBefore: rawPortfolio }, profileId);
       const mode = state.profiles?.find((profile) => profile.id === profileId)?.autonomyMode ?? 3;
       const hbarBal = rawPortfolio.allocations.find((a) => a.symbol.toUpperCase() === "HBAR")?.balanceFormatted;
       think(
         hbarBal === undefined
-          ? "Mirror Node returned the live holdings. Next I need paid intelligence for HBAR, USDC, and SAUCE before judging the bands."
-          : `Holdings are in — ${hbarBal.toFixed(4)} HBAR on the book, plus any HTS balances. I still need fresh paid prices before any rebalance call.`,
+          ? "Live holdings are in. Next I need paid market prices for HBAR, USDC, and SAUCE before judging the mix."
+          : `Holdings are in — ${hbarBal.toFixed(4)} HBAR on the book, plus any token balances. I still need fresh paid prices before any rebalance call.`,
       );
       if (mode === 1) {
         record.recommendation = { summary: "Observe-only mode recorded the live portfolio without purchasing intelligence or proposing a trade.", action: "watch", confidence: 1, rationale: ["Autonomy mode 1"], source: "deterministic" };
@@ -151,8 +151,8 @@ export class MultiAssetAgentRunner {
         think("Mode 1 is observe-only, so I stop after recording the portfolio — no paid reads and no trade proposal.");
         event("analysis.completed", "Observe-only check-in complete", record.recommendation.summary);
         conclude(record, "Conclusion: observed the live portfolio only — no paid CoinGecko reads and no trade.", [
-          `Account ${accountId} was read from Mirror Node.`,
-          "Autonomy mode 1 forbids intelligence purchases and execution.",
+          `Account ${accountId} balances were read live from Hedera.`,
+          "Observe-only mode forbids buying market data or placing trades.",
         ]);
         store.updateRun(runId, record, profileId);
         sseBroadcaster.broadcast("agent.completed", { runId, record }, { profileId, runId });
@@ -172,7 +172,7 @@ export class MultiAssetAgentRunner {
         if (cached && Date.now() - cached.at < 60_000) {
           prices[symbol] = cached.price;
           think(`${symbol} still has a paid CoinGecko signal inside its freshness window — reusing it instead of spending again.`);
-          event("data.received", `${symbol} intelligence reused`, `Reused paid CoinGecko signal at $${cached.price}.`, { provenance: "cached", price: cached.price, symbol });
+          event("data.received", `${symbol} market data reused`, `Still fresh from a recent paid read — about $${cached.price} each.`, { provenance: "cached", price: cached.price, symbol });
           if (cached.data) {
             record.dataPurchases.push({
               symbol,
@@ -193,7 +193,7 @@ export class MultiAssetAgentRunner {
         const remaining = remainingCycle < remainingDaily ? remainingCycle : remainingDaily;
         if (remaining <= 0n) throw new Error("x402 data budget exhausted before all required asset signals were acquired");
         think(`Requesting a paid CoinGecko quote for ${symbol} — I want the live price plus 24h change/volume before judging this sleeve.`);
-        event("payment.required", `Buying ${symbol} intelligence`, "Requesting a real x402 quote for CoinGecko market data.");
+        event("payment.required", `Paying for ${symbol} market data`, "Sending a tiny on-chain payment to unlock a fresh CoinGecko price for this asset.");
         // Brief pause between paid reads so CoinGecko rate limits are less likely mid-cycle.
         if (insights.length > 0) await new Promise((resolve) => setTimeout(resolve, 400));
         let result = await this.intelligence.run({
@@ -243,7 +243,7 @@ export class MultiAssetAgentRunner {
         const amountHbar = Number(BigInt(result.purchase.amountAtomic)) / 1e8;
         record.dataPurchases.push({ symbol, productId: result.purchase.productId, amountHbar, transactionId: result.purchase.transactionId, hashscanUrl: result.purchase.hashscanUrl, data: result.purchase.data });
         store.recordSpend(amountHbar, 0, profileId);
-        event("payment.settled", `${symbol} payment verified`, `CoinGecko ${symbol} @ $${signal.price} · x402 receipt ${result.purchase.transactionId}`, { transactionId: result.purchase.transactionId, hashscanUrl: result.purchase.hashscanUrl, provenance: signal.provenance, price: signal.price, symbol });
+        event("payment.settled", `${symbol} market data unlocked`, `Paid and confirmed — ${symbol} is about $${signal.price}.`, { transactionId: result.purchase.transactionId, hashscanUrl: result.purchase.hashscanUrl, provenance: signal.provenance, price: signal.price, symbol });
         const insight = insightFromPaidData(symbol, result.purchase.data);
         insights.push(insight);
         for (const sentence of insight.sentences) think(sentence);
@@ -275,7 +275,7 @@ export class MultiAssetAgentRunner {
         source: "deterministic",
       };
       record.recommendation = recommendation;
-      event("analysis.completed", "Market-backed portfolio evaluation", recommendation.summary, { recommendation, insights });
+      event("analysis.completed", "Comparing your mix to the target bands", recommendation.summary, { recommendation, insights });
       if (mode === 2) {
         think("Mode 2 stops at advice — recording the recommendation without proposing an executable order.");
         record.status = "completed"; record.completedAt = new Date().toISOString();
@@ -338,7 +338,7 @@ export class MultiAssetAgentRunner {
         if (fromDecimals === undefined) throw new Error(`Cannot quote ${candidate.fromSymbol}: token decimals are unavailable`);
         const amountIn = BigInt(Math.floor(proposal.amountFormatted * 10 ** fromDecimals));
         const dexConfig = saucerConfig(this.config);
-        think(`Asking SaucerSwap QuoterV2 for an executable ${candidate.fromSymbol} → ${candidate.toSymbol} route at this size.`);
+        think(`Checking the live exchange rate for ${candidate.fromSymbol} → ${candidate.toSymbol} at this size before placing anything.`);
         const quote = await quoteSaucerExactInput({
           fromSymbol: candidate.fromSymbol, toSymbol: candidate.toSymbol, amountIn,
           amountInFormatted: proposal.amountFormatted, expectedAmountOutFormatted: 0,
@@ -349,7 +349,14 @@ export class MultiAssetAgentRunner {
         quote.amountOutMinimum = quote.expectedAmountOut * BigInt(10_000 - Number(this.config.tradeSlippageBps ?? "100")) / 10_000n;
         const provenance = Array.from(this.signalCache.values()).some((signal) => signal.provenance === "fallback") ? "fallback" : "live";
         const policy = this.tradePolicy.validate(proposal, { availableBalance: source?.balanceFormatted ?? 0, portfolioUsd: portfolio.totalUsdValue ?? 0, amountUsd, provenance, halted: store.isHalted(), quote });
-        event(policy.approved ? "trade.proposed" : "trade.skipped", policy.approved ? "Trade proposed" : "Trade blocked", policy.reason, { proposal, amountUsd });
+        event(
+          policy.approved ? "trade.proposed" : "trade.skipped",
+          policy.approved ? "Ready to rebalance" : "Rebalance held back",
+          policy.approved
+            ? `Planning to exchange about ${proposal.amountFormatted.toFixed(4)} ${proposal.fromSymbol} for ${candidate.toSymbol}.`
+            : policy.reason,
+          { proposal, amountUsd },
+        );
         if (policy.approved) {
           const builtTransaction = buildExactInputTransaction({
             quote,
@@ -358,45 +365,74 @@ export class MultiAssetAgentRunner {
           });
           const canExecuteAutonomously = state.schedule.autonomousTrading && accountId === this.config.agentPayerId && Boolean(this.config.agentPayerKey);
           if (canExecuteAutonomously) {
-            event("trade.approved", "Trade passed autonomous policy", "Submitting the verified SaucerSwap V2 call.", { quote, presentInUi: true });
-            think("Policy cleared the order — CoinGecko tape + band math + live quote all agree. Submitting from the agent treasury.");
-            event("trade.submitted", "Trade submitted", "Awaiting Hedera consensus for the SaucerSwap call.", { quote });
+            event("trade.approved", "Safety checks passed — sending the trade", "Market data, portfolio bands, and the live exchange quote all agree. Sending from the agent treasury.", { quote, presentInUi: true });
+            think("Safety checks cleared — market data, band math, and the live exchange quote agree. Sending the swap from the agent treasury.");
+            event("trade.submitted", "Exchange order sent", "Waiting for the network to confirm the swap.", { quote });
             const result = await executeSaucerSwap({ payerId: accountId, payerKey: this.config.agentPayerKey!, quote, transaction: builtTransaction, mirrorBaseUrl: this.config.mirrorNodeBaseUrl });
             record.tradeExecutions.push(result);
             store.recordSpend(0, proposal.amountFormatted, profileId);
-            event("trade.verified", "Trade verified on Hedera", `${proposal.amountFormatted} ${proposal.fromSymbol} → ${quote.expectedAmountOutFormatted} ${proposal.toSymbol}`, { result, transactionId: result.transactionId });
-            think(`Swap verified on Hedera: ${proposal.amountFormatted.toFixed(4)} ${proposal.fromSymbol} → ${quote.expectedAmountOutFormatted} ${proposal.toSymbol}.`);
+            event(
+              "trade.verified",
+              "Swap completed",
+              `Exchanged ${proposal.amountFormatted.toFixed(4)} ${proposal.fromSymbol} for about ${Number(quote.expectedAmountOutFormatted).toFixed(4)} ${proposal.toSymbol}.`,
+              { result, transactionId: result.transactionId },
+            );
+            think(`Swap confirmed: ${proposal.amountFormatted.toFixed(4)} ${proposal.fromSymbol} → about ${Number(quote.expectedAmountOutFormatted).toFixed(4)} ${proposal.toSymbol}.`);
+            try {
+              const afterRaw = await readPortfolio(accountId);
+              const afterManaged = ASSETS.map((symbol) => afterRaw.allocations.find((allocation) => allocation.symbol.toUpperCase() === symbol) ?? {
+                symbol,
+                tokenId: symbol === "HBAR" ? undefined : dexConfig.tokenIds[symbol],
+                balanceFormatted: 0,
+                usdValue: 0,
+                allocationPct: 0,
+              });
+              const after = valuePortfolio({ ...afterRaw, allocations: afterManaged }, prices);
+              record.portfolioAfter = after;
+              store.updateRun(runId, { portfolioAfter: after, tradeExecutions: record.tradeExecutions }, profileId);
+              const mix = after.allocations.map((item) => `${item.symbol} ${item.allocationPct.toFixed(1)}%`).join(" · ");
+              event(
+                "portfolio.updated",
+                "Portfolio refreshed after the swap",
+                `Balances and mix updated — ${mix} (about $${(after.totalUsdValue ?? 0).toFixed(2)} total).`,
+                { portfolio: after, presentInUi: true },
+              );
+              think(`Holdings updated after the swap: ${mix}.`);
+            } catch {
+              think("The swap confirmed, but I could not refresh live balances yet — the next check-in will pick them up.");
+            }
           } else {
-            think("I prepared an executable quote and paused for approval — nothing moves until you confirm.");
+            think("I prepared an exchange quote and paused for your approval — nothing moves until you confirm.");
             const pending: PendingTrade = { id: randomUUID(), runId, accountId, proposal, quote, builtTransaction, createdAt: new Date().toISOString(), status: "pending" };
             store.addPendingTrade(pending, profileId); record.pendingTradeIds.push(pending.id); record.status = "waiting_approval";
           }
         } else {
-          think(`Policy blocked the sale: ${policy.reason}`);
+          think(`I held the sale back: ${policy.reason}`);
         }
       } else {
-        think("Bands look healthy after the paid reads — no rebalance candidate this cycle.");
+        think("Your mix looks healthy after the paid reads — no rebalance needed this cycle.");
       }
       if (record.status !== "waiting_approval") record.status = "completed";
       record.completedAt = new Date().toISOString();
-      const hbar = portfolio.allocations.find((allocation) => allocation.symbol === "HBAR");
+      const snapshot = record.portfolioAfter ?? portfolio;
+      const hbar = snapshot.allocations.find((allocation) => allocation.symbol === "HBAR");
       const traded = record.tradeExecutions[0];
       const pending = record.status === "waiting_approval" || record.pendingTradeIds.length > 0;
       const conclusion = traded
-        ? `Conclusion: rebalanced on-chain — ${traded.amountInFormatted} ${traded.fromSymbol} → ${traded.amountOutFormatted ?? "?"} ${traded.toSymbol}.`
+        ? `Conclusion: rebalanced — ${traded.amountInFormatted} ${traded.fromSymbol} → ${traded.amountOutFormatted ?? "?"} ${traded.toSymbol}.`
         : pending
           ? `Conclusion: prepared a rebalance and paused for your approval.`
           : record.tradeProposals[0]
             ? `Conclusion: evaluated a rebalance but did not execute — ${record.events.find((item) => item.kind === "trade.skipped")?.detail ?? recommendation.summary}`
             : `Conclusion: ${recommendation.summary}`;
       conclude(record, conclusion, [
-        `CoinGecko-backed prices used for ${Object.keys(prices).join(", ")} (${record.dataPurchases.filter((p) => !p.transactionId.startsWith("cache:")).length} paid x402 reads this cycle).`,
-        `Portfolio about $${(portfolio.totalUsdValue ?? 0).toFixed(2)}${hbar ? ` · HBAR ${hbar.allocationPct.toFixed(1)}% of book` : ""}.`,
+        `Fresh market prices used for ${Object.keys(prices).join(", ")} (${record.dataPurchases.filter((p) => !p.transactionId.startsWith("cache:")).length} paid data reads this cycle).`,
+        `Portfolio about $${(snapshot.totalUsdValue ?? 0).toFixed(2)}${hbar ? ` · HBAR ${hbar.allocationPct.toFixed(1)}% of the mix` : ""}.`,
         traded
-          ? `Trade verified: ${traded.transactionId}`
+          ? `Swap confirmed on Hedera — you can open the receipt link for proof.`
           : pending
-            ? "Awaiting your approval before any funds move."
-            : "No executable trade cleared policy this cycle.",
+            ? "Waiting for your approval before any funds move."
+            : "No trade cleared the safety checks this cycle.",
       ]);
       store.updateRun(runId, record, profileId); sseBroadcaster.broadcast("agent.completed", { runId, record }, { profileId, runId }); return record;
     } catch (error) {

@@ -5,18 +5,18 @@ import { Receipt } from "./Receipt";
 import { LoadingState } from "../kit/LoadingState";
 
 const STEP_LABEL: Record<string, string> = {
-  trigger: "Trigger",
-  observe: "Observe",
-  judge: "Judge",
-  acquire: "Acquire",
-  reason: "Reason",
-  propose: "Propose",
-  gate: "Gate",
-  decide: "Decide",
-  execute: "Execute",
-  verify: "Verify",
-  record: "Record",
-  noop: "Outcome",
+  trigger: "Started",
+  observe: "Check holdings",
+  judge: "Review",
+  acquire: "Buy market data",
+  reason: "Thinking",
+  propose: "Suggest trade",
+  gate: "Needs approval",
+  decide: "Decision",
+  execute: "Place trade",
+  verify: "Confirm trade",
+  record: "Wrap up",
+  noop: "No change",
 };
 
 const toneText = (t?: AgentEvent["tone"]) =>
@@ -53,7 +53,7 @@ function Settlement({ event }: { event: AgentEvent }) {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <path d="M20 6L9 17l-5-5" />
             </svg>
-            Verified on Hedera
+            Swap confirmed
             {s.confirmedAt && s.submittedAt ? (
               <span className="font-mono text-[11px] font-normal text-ink-3 tabular-nums">
                 {((s.confirmedAt - s.submittedAt) / 1000).toFixed(1)}s
@@ -62,7 +62,7 @@ function Settlement({ event }: { event: AgentEvent }) {
           </span>
         ) : (
           <LoadingState
-            label="Awaiting consensus"
+            label="Waiting for confirmation"
             variant={loaderVariant}
             startedAt={s.submittedAt}
             tone="signal"
@@ -75,7 +75,7 @@ function Settlement({ event }: { event: AgentEvent }) {
               : "border-orange/30 bg-orange-soft text-orange"
           }`}
         >
-          {confirmed ? "Final" : "Not yet final"}
+          {confirmed ? "Done" : "In progress"}
         </span>
       </div>
       {s.txHash && s.txHash !== "pending" && (
