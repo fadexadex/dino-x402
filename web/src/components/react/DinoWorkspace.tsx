@@ -463,6 +463,7 @@ export function DinoWorkspace() {
                 className={`flex min-h-0 flex-1 flex-col overflow-auto px-5 py-5 ${gap}`}
               >
                 <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+                  {run.connected && (
                   <section
                     className={`grid gap-3 ${rightNowPlacement === "Inline card" ? "sm:grid-cols-2" : ""}`}
                   >
@@ -488,6 +489,7 @@ export function DinoWorkspace() {
                     />
                     {rightNowPlacement === "Inline card" && rightNowCard}
                   </section>
+                  )}
 
                   {/* Mobile holdings strip — desktop uses the left rail. */}
                   <section className="rounded-lg border border-line bg-card p-3 lg:hidden">
