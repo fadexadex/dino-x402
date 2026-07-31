@@ -157,6 +157,20 @@ export async function loadDashboard(preferredProfileId?: string | null): Promise
   const preferred = preferredProfileId ?? getPreferredProfileId();
   const profile = pickProfile(list, preferred, serverActiveId);
   if (!profile) return { profiles: list, activeProfileId: serverActiveId };
+  // After disconnect, sessions remain saved but none are active — keep the picker empty.
+  if (profile.status !== "active") {
+    setPreferredProfileId(null);
+    return {
+      profiles: list,
+      activeProfileId: null,
+      system: { halted: false },
+      events: [],
+      runs: [],
+      pendingProposals: [],
+      proposals: [],
+      receipts: [],
+    };
+  }
   setPreferredProfileId(profile.id);
   const [dashboard, graph, receiptResult] = await Promise.all([
     request<DashboardSnapshot>(`/profiles/${profile.id}/dashboard`),
