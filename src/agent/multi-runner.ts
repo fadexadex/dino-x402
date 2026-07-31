@@ -17,6 +17,8 @@ import {
 } from "../trading/saucerswap.js";
 import { executeSaucerSwap } from "../trading/executor.js";
 import { insightFromPaidData, portfolioInsightNarrative, type MarketInsight } from "./insights.js";
+import { MistralAdvisor } from "./mistral.js";
+import { classifyObjective, focusSymbolFromObjective, formatTradeAmount } from "./objective.js";
 
 const ASSETS = ["HBAR", "USDC", "SAUCE"] as const;
 const MIN_TRADE_USD = 0.5;
@@ -82,10 +84,15 @@ function saucerConfig(config: ServerConfig): SaucerSwapConfig {
 export class MultiAssetAgentRunner {
   private readonly tradePolicy: TradePolicy;
   private readonly intelligence: AgentRunner;
+  private readonly advisor: MistralAdvisor;
   private readonly signalCache = new Map<string, { price: number; at: number; provenance: "live" | "fallback"; data?: unknown; productId?: string; transactionId?: string; hashscanUrl?: string }>();
 
   constructor(private readonly config: ServerConfig, _provider?: DataProvider) {
     this.intelligence = new AgentRunner(config);
+    this.advisor = new MistralAdvisor({
+      apiKey: config.mistralApiKey,
+      model: config.mistralModel ?? "mistral-small-latest",
+    });
     this.tradePolicy = new TradePolicy({
       maxTradeAmountTinybar: BigInt(config.tradeMaxAmountTinybar ?? "1000000000"),
       maxSlippageBps: Number(config.tradeSlippageBps ?? "500"),
@@ -124,8 +131,8 @@ export class MultiAssetAgentRunner {
       event("agent.thinking", title, detail, { presentInUi: true });
     };
     const conclude = (record: AgentMultiRunRecord, headline: string, bullets: string[]) => {
-      think(headline);
-      event("run.completed", "Conclusion", headline, {
+      // Do not re-emit the headline as a thought — that duplicated the Conclusion card.
+      event("run.completed", "Conclusion", headline.replace(/^Conclusion:\s*/i, "Conclusion: "), {
         presentInUi: true,
         bullets,
         recommendation: record.recommendation,
@@ -136,6 +143,8 @@ export class MultiAssetAgentRunner {
     };
     const objective = input.objective?.trim().slice(0, 600) || "Autonomous multi-asset portfolio monitoring and rebalancing";
     const userProvidedObjective = Boolean(input.objective?.trim());
+    const intent = classifyObjective(objective, userProvidedObjective);
+    const focusSymbol = focusSymbolFromObjective(objective);
     const record: AgentMultiRunRecord = {
       id: runId,
       accountId,
@@ -158,7 +167,13 @@ export class MultiAssetAgentRunner {
         event("user.message", "You", objective, { role: "user", presentInUi: true });
       }
       event("run.triggered", "Check-in started", objective, { objective, presentInUi: true });
-      think(`Reading the request and planning a portfolio check-in for ${accountId}.`);
+      think(
+        intent === "research"
+          ? `You asked me to research${focusSymbol ? ` ${focusSymbol}` : ""} — I'll gather paid market context first and keep this non-executing.`
+          : intent === "advise"
+            ? "You asked for a market read / recommendation — I'll buy fresh intelligence, then answer without forcing a trade."
+            : `Reading the request and planning a portfolio check-in for ${accountId}.`,
+      );
       event("portfolio.read", "Checking your live balances", `Looking up what this account currently holds on Hedera.`);
       const rawPortfolio = await readPortfolio(accountId);
       record.portfolioBefore = rawPortfolio; store.updateRun(runId, { portfolioBefore: rawPortfolio }, profileId);
@@ -167,7 +182,7 @@ export class MultiAssetAgentRunner {
       think(
         hbarBal === undefined
           ? "Live holdings are in. Next I need paid market prices for HBAR, USDC, and SAUCE before judging the mix."
-          : `Holdings are in — ${hbarBal.toFixed(4)} HBAR on the book, plus any token balances. I still need fresh paid prices before any rebalance call.`,
+          : `Holdings are in — ${hbarBal.toFixed(4)} HBAR on the book, plus any token balances. I still need fresh paid prices before I answer.`,
       );
       if (mode === 1) {
         record.recommendation = { summary: "Observe-only mode recorded the live portfolio without purchasing intelligence or proposing a trade.", action: "watch", confidence: 1, rationale: ["Autonomy mode 1"], source: "deterministic" };
@@ -292,22 +307,66 @@ export class MultiAssetAgentRunner {
         candidate,
       });
       for (const line of narrative) think(line);
+      const allowTrade = intent === "act" && mode >= 3;
+      think(
+        intent === "research"
+          ? "This prompt is research-only — I'll answer from the paid tape and skip executable orders."
+          : intent === "advise" || mode === 2
+            ? "This prompt is advisory — I'll share a recommendation without submitting a swap."
+            : allowTrade
+              ? "This prompt allows action within Mode limits — I'll propose or execute if bands require it."
+              : "Staying in watch mode for this check-in.",
+      );
+      const brief = await this.advisor.briefObjective({
+        objective,
+        intent,
+        mode,
+        ...(focusSymbol ? { focusSymbol } : {}),
+        insights: insights.map((insight) => ({
+          symbol: insight.symbol,
+          ...(insight.price !== undefined ? { price: insight.price } : {}),
+          ...(insight.change24hPercent !== undefined ? { change24hPercent: insight.change24hPercent } : {}),
+          ...(insight.volume24hUsd !== undefined ? { volume24hUsd: insight.volume24hUsd } : {}),
+          sentences: insight.sentences,
+        })),
+        allocations: portfolio.allocations.map((item) => ({
+          symbol: item.symbol,
+          allocationPct: item.allocationPct,
+          usdValue: item.usdValue,
+        })),
+        bands,
+        candidate: {
+          action: candidate.action,
+          ...(candidate.fromSymbol ? { fromSymbol: candidate.fromSymbol } : {}),
+          ...(candidate.toSymbol ? { toSymbol: candidate.toSymbol } : {}),
+          reason: candidate.reason,
+          ...(candidate.amountUsd !== undefined ? { amountUsd: candidate.amountUsd } : {}),
+        },
+      });
+      for (const line of brief.thoughts) think(line);
       const recommendation: AgentRecommendation = {
-        summary: candidate.reason,
-        action: candidate.action === "swap" ? "rebalance" : "watch",
-        confidence: 1,
-        rationale: narrative.slice(0, 4),
-        source: "deterministic",
+        summary: brief.summary,
+        action: allowTrade && candidate.action === "swap" ? "rebalance" : "watch",
+        confidence: 0.85,
+        rationale: brief.bullets.slice(0, 4),
+        source: "mistral",
       };
       record.recommendation = recommendation;
-      event("analysis.completed", "Comparing your mix to the target bands", recommendation.summary, { recommendation, insights, candidate });
-      if (mode === 2) {
-        think("Mode 2 stops at advice — recording the recommendation without proposing an executable order.");
+      event(
+        "analysis.completed",
+        intent === "research" ? "Researching the market tape" : "Comparing your mix to the target bands",
+        intent === "act" && candidate.action === "swap"
+          ? candidate.reason
+          : `Paid reads reviewed for ${Object.keys(prices).join(", ")}.`,
+        { recommendation, insights, candidate, intent },
+      );
+      if (mode === 2 || !allowTrade) {
+        think(mode === 2 ? "Mode 2 stops at advice — no executable order." : "No trade path for this prompt — wrapping up with a clear answer.");
         record.status = "completed"; record.completedAt = new Date().toISOString();
-        conclude(record, `Conclusion: ${recommendation.summary}`, [
+        conclude(record, `Conclusion: ${brief.summary}`, brief.bullets.length ? brief.bullets : [
           `Paid/reused CoinGecko quotes for ${Object.keys(prices).join(", ")}.`,
           `Portfolio marked at about $${(portfolio.totalUsdValue ?? 0).toFixed(2)}.`,
-          "Advise-only mode — no order was proposed or submitted.",
+          intent === "research" ? "Research-only — no order was proposed or submitted." : "Advise path — no order was proposed or submitted.",
         ]);
         store.updateRun(runId, record, profileId);
         sseBroadcaster.broadcast("agent.completed", { runId, record }, { profileId, runId });
@@ -444,13 +503,13 @@ export class MultiAssetAgentRunner {
       const traded = record.tradeExecutions[0];
       const pending = record.status === "waiting_approval" || record.pendingTradeIds.length > 0;
       const conclusion = traded
-        ? `Conclusion: rebalanced — ${traded.amountInFormatted} ${traded.fromSymbol} → ${traded.amountOutFormatted ?? "?"} ${traded.toSymbol}.`
+        ? `Conclusion: rebalanced — ${formatTradeAmount(traded.amountInFormatted)} ${traded.fromSymbol} → ${formatTradeAmount(traded.amountOutFormatted)} ${traded.toSymbol}.`
         : pending
           ? `Conclusion: prepared a rebalance and paused for your approval.`
           : record.tradeProposals[0]
             ? `Conclusion: evaluated a rebalance but did not execute — ${record.events.find((item) => item.kind === "trade.skipped")?.detail ?? recommendation.summary}`
             : `Conclusion: ${recommendation.summary}`;
-      conclude(record, conclusion, [
+      conclude(record, conclusion, recommendation.rationale.length ? recommendation.rationale : [
         `Fresh market prices used for ${Object.keys(prices).join(", ")} (${record.dataPurchases.filter((p) => !p.transactionId.startsWith("cache:")).length} paid data reads this cycle).`,
         `Portfolio about $${(snapshot.totalUsdValue ?? 0).toFixed(2)}${hbar ? ` · HBAR ${hbar.allocationPct.toFixed(1)}% of the mix` : ""}.`,
         traded

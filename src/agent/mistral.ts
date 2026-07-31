@@ -130,6 +130,75 @@ export class MistralAdvisor {
     }
   }
 
+  /**
+   * Answer the user's free-text objective using paid market insights + band context.
+   * Used by the multi-asset runner so research / advise prompts don't collapse into
+   * a robotic "bands are satisfied" line.
+   */
+  async briefObjective(args: {
+    objective: string;
+    intent: "research" | "advise" | "act";
+    mode: number;
+    focusSymbol?: string;
+    insights: Array<{
+      symbol: string;
+      price?: number;
+      change24hPercent?: number;
+      volume24hUsd?: number;
+      sentences: string[];
+    }>;
+    allocations: Array<{ symbol: string; allocationPct: number; usdValue: number }>;
+    bands: Array<{ symbol: string; minPct: number; targetPct: number; maxPct: number }>;
+    candidate: { action: string; fromSymbol?: string; toSymbol?: string; reason: string; amountUsd?: number };
+  }): Promise<{ summary: string; thoughts: string[]; bullets: string[] }> {
+    const fallback = (): { summary: string; thoughts: string[]; bullets: string[] } => {
+      const focus = args.focusSymbol?.toUpperCase();
+      const focusInsight = args.insights.find((item) => item.symbol.toUpperCase() === focus);
+      const mix = args.allocations
+        .map((item) => `${item.symbol} ${item.allocationPct.toFixed(1)}%`)
+        .join(" · ");
+      const thoughts = [
+        focus
+          ? `You asked about ${focus} — I'm grounding the answer in the paid CoinGecko read for that sleeve first.`
+          : "You asked for market context, so I'm reading the paid CoinGecko tape before any recommendation.",
+        ...(focusInsight?.sentences.slice(0, 2) ?? args.insights.flatMap((item) => item.sentences.slice(0, 1)).slice(0, 3)),
+        args.candidate.action === "swap"
+          ? `Allocation check: ${args.candidate.reason}`
+          : `Allocation check: the book is near target (${mix}).`,
+      ];
+      const summary = focusInsight?.price !== undefined
+        ? `${focus} is about $${focusInsight.price}${focusInsight.change24hPercent !== undefined ? ` (${focusInsight.change24hPercent >= 0 ? "+" : ""}${focusInsight.change24hPercent.toFixed(2)}% 24h)` : ""} on the paid CoinGecko read. Current mix: ${mix}. ${args.intent === "research" ? "No trades — research-only as requested." : "No rebalance needed unless you ask to act."}`
+        : `Paid reads are in for ${args.insights.map((item) => item.symbol).join(", ")}. Current mix: ${mix}. ${args.intent === "research" ? "No trades — research-only as requested." : args.candidate.reason}`;
+      return {
+        summary: summary.slice(0, 500),
+        thoughts: thoughts.filter(Boolean).slice(0, 6),
+        bullets: [
+          `Focus: ${focus ?? "full book"} · intent ${args.intent} · mode ${args.mode}.`,
+          `Mix ${mix}.`,
+          args.intent === "research" ? "No executable order was prepared." : "Bands and paid tape informed this answer.",
+        ],
+      };
+    };
+
+    try {
+      const result = await this.complete(
+        "You are Dino, a concise Hedera portfolio agent. Answer the user's objective using ONLY the supplied paid insights, allocations, and band candidate. Return JSON: summary (string, 1-3 sentences, plain English), thoughts (array of 3-6 short first-person reasoning lines), bullets (array of 2-4 short facts). If intent is research, do not recommend executing a trade. Do not invent prices.",
+        JSON.stringify(args),
+      );
+      const summary = typeof result.summary === "string" ? result.summary.trim() : "";
+      const thoughts = Array.isArray(result.thoughts) ? result.thoughts.filter((item): item is string => typeof item === "string") : [];
+      const bullets = Array.isArray(result.bullets) ? result.bullets.filter((item): item is string => typeof item === "string") : [];
+      if (!summary || thoughts.length === 0) throw new Error("Invalid brief schema");
+      return {
+        summary: summary.slice(0, 500),
+        thoughts: thoughts.slice(0, 6).map((item) => item.slice(0, 280)),
+        bullets: bullets.slice(0, 4).map((item) => item.slice(0, 240)),
+      };
+    } catch {
+      return fallback();
+    }
+  }
+
   async analyze(args: {
     objective: string;
     portfolio: PortfolioHolding[];

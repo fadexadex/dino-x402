@@ -19,8 +19,9 @@ export function ThinkingReasoning({
   placeholder?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const [fade, setFade] = useState({ top: false, bottom: true });
+  const [fade, setFade] = useState({ top: false, bottom: false });
   const [visibleCount, setVisibleCount] = useState(0);
+  const [measuredH, setMeasuredH] = useState(0);
   const viewportRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
   const seenRef = useRef(0);
@@ -34,9 +35,10 @@ export function ThinkingReasoning({
     // Hard reset whenever the active run changes — clears faded leftovers.
     seenRef.current = 0;
     setVisibleCount(0);
+    setMeasuredH(0);
     setOpen(false);
     setFrozenElapsed(null);
-    setFade({ top: false, bottom: true });
+    setFade({ top: false, bottom: false });
   }, [resetToken]);
 
   useEffect(() => {
@@ -86,7 +88,6 @@ export function ThinkingReasoning({
     ?? Math.max(1, Math.round((Date.now() - (startedAt ?? Date.now())) / 1000));
   const MAX_H = 200;
   const shown = sentences.slice(0, visibleCount);
-  const [measuredH, setMeasuredH] = useState(0);
   useLayoutEffect(() => {
     setMeasuredH(streamRef.current?.scrollHeight ?? 0);
   }, [shown.length, expanded, working, placeholder]);
@@ -98,8 +99,9 @@ export function ThinkingReasoning({
   const scrollable = done && open;
   const FADE = 18;
   const translate = scrollable ? 0 : capped ? MAX_H - FADE - height : 0;
+  // While streaming, only fade the top so newest thoughts stay fully readable.
   const showTop = scrollable ? fade.top : capped;
-  const showBottom = scrollable ? fade.bottom : capped;
+  const showBottom = scrollable ? fade.bottom : false;
   const mask = capped
     ? `linear-gradient(to bottom, transparent 0, #000 ${showTop ? FADE : 0}px, #000 calc(100% - ${showBottom ? FADE : 0}px), transparent 100%)`
     : "none";
@@ -205,22 +207,25 @@ export function ThinkingReasoning({
                 transition: "transform 520ms cubic-bezier(0.22,1,0.36,1)",
               }}
             >
-              {shown.map((line, i) => (
-                <p
-                  key={`thought-${i}`}
-                  className="m-0 text-[13px] leading-[1.45] font-[425] tracking-[-0.005em] text-ink-2"
-                  style={{
-                    animation: i >= seenRef.current - 1
-                      ? "fade-up 480ms cubic-bezier(0.22,1,0.36,1) both"
-                      : undefined,
-                  }}
-                >
-                  {line}
-                </p>
-              ))}
+              {shown.map((line, i) => {
+                const newest = i >= shown.length - 1;
+                return (
+                  <p
+                    key={`thought-${i}`}
+                    className={`m-0 text-[13px] leading-[1.45] font-[425] tracking-[-0.005em] ${newest || working ? "text-ink" : "text-ink-2"}`}
+                    style={{
+                      animation: i >= seenRef.current - 1
+                        ? "fade-up 480ms cubic-bezier(0.22,1,0.36,1) both"
+                        : undefined,
+                    }}
+                  >
+                    {line}
+                  </p>
+                );
+              })}
               {working && shown.length === 0 && (
                 <p
-                  className="m-0 text-[13px] leading-[1.45] font-[425] tracking-[-0.005em] text-ink-2"
+                  className="m-0 text-[13px] leading-[1.45] font-[425] tracking-[-0.005em] text-ink"
                   style={{ animation: "fade-in 300ms ease both" }}
                 >
                   {placeholder}

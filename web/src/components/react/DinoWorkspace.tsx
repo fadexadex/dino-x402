@@ -16,7 +16,7 @@ import { ThinkingReasoning } from "@/components/kit/ThinkingReasoning";
 import type { AgentEvent, AutonomyMode, Limits } from "@/lib/agent-types";
 import { useVariant, useVariants } from "@/lib/variants";
 import { api } from "@/lib/agent-api";
-import { isConclusionKind, isStreamMetaKind, isUserFacingKind, toEvent, toHoldings, toProposal } from "@/lib/agent-view";
+import { isConclusionKind, isStreamMetaKind, isUserFacingKind, reconcileSettlements, toEvent, toHoldings, toProposal } from "@/lib/agent-view";
 import { signAndExecuteSwap } from "@/lib/wallet-sign";
 import { connectWallet, disconnectWallet, getConnectedAccountId, getConnector, walletConfig } from "@/lib/wallet";
 import { useAgentDashboard } from "./useAgentDashboard";
@@ -56,19 +56,29 @@ export function DinoWorkspace() {
   const waitingRunId = data?.runs?.find((item) => item.status === "waiting_approval")?.id;
   const runningRunId = data?.runs?.find((item) => item.status === "running")?.id;
   const latestRunId = waitingRunId ?? runningRunId ?? data?.runs?.[0]?.id;
-  // While a new check-in is starting, never paint the previous run's thoughts under “Thinking…”.
-  const thoughtRunId = runningRunId ?? (sending ? null : waitingRunId ?? data?.runs?.[0]?.id ?? null);
+  // Keep the live thought stream attached to the active run; while Send is in-flight,
+  // hold the previous run until the new running id arrives (avoids a blank Thinking panel).
+  const thoughtRunId = runningRunId ?? waitingRunId ?? (!sending ? data?.runs?.[0]?.id ?? null : latestRunId ?? null);
   // Prefer curated titles from the server; drop bare "trade rejected" audit leftovers.
   const visibleEvents = (data?.events ?? []).filter((event) => {
     if (!isUserFacingKind(event.kind)) return false;
     if (event.kind === "trade.rejected" && (!event.title || event.title === "trade rejected")) return false;
     return true;
   });
-  const rawEvents = latestRunId
-    ? visibleEvents.filter((event) => event.runId === latestRunId)
-    : visibleEvents.slice(-40);
+  // Continuous chat: show the recent conversation across runs, not only the latest check-in.
+  const recentRunIds = useMemo(() => {
+    const ids = (data?.runs ?? []).slice(0, 8).map((item) => item.id);
+    return new Set(ids);
+  }, [data?.runs]);
+  const rawEvents = useMemo(() => {
+    const scoped = visibleEvents.filter((event) => !event.runId || recentRunIds.has(event.runId) || recentRunIds.size === 0);
+    return scoped.slice(-120);
+  }, [visibleEvents, recentRunIds]);
   const receipts = data?.receipts ?? [];
-  const baseEvents = useMemo(() => rawEvents.map((event) => toEvent(event, receipts)), [rawEvents, receipts]);
+  const baseEvents = useMemo(
+    () => reconcileSettlements(rawEvents.map((event) => toEvent(event, receipts))),
+    [rawEvents, receipts],
+  );
   const thoughtSentences = useMemo(
     () => {
       if (!thoughtRunId) return [];
@@ -82,11 +92,18 @@ export function DinoWorkspace() {
   const serverUserTexts = useMemo(
     () =>
       new Set(
-        rawEvents
+        visibleEvents
           .filter((event) => event.kind === "user.message")
           .map((event) => (event.detail || event.title || "").trim().toLowerCase()),
       ),
-    [rawEvents],
+    [visibleEvents],
+  );
+  const latestRunEvents = useMemo(
+    () => (latestRunId ? baseEvents.filter((event) => {
+      const source = rawEvents.find((item) => item.id === event.id);
+      return source?.runId === latestRunId;
+    }) : baseEvents),
+    [baseEvents, rawEvents, latestRunId],
   );
   const halted = Boolean(data?.system?.halted || profile?.status === "halted");
   const connected = Boolean(profile?.accountId && profile?.status === "active");
@@ -138,9 +155,9 @@ export function DinoWorkspace() {
     }
   };
   const run = {
-    events: baseEvents.filter((event) => !isStreamMetaKind(event.kind ?? "") && !isConclusionKind(event.kind ?? "")),
+    events: latestRunEvents.filter((event) => !isStreamMetaKind(event.kind ?? "") && !isConclusionKind(event.kind ?? "")),
     ticks: data?.graph?.ticks?.map((tick) => ({ ...tick, provenance: tick.provenance === "stale" ? "fallback" as const : tick.provenance })) ?? [],
-    markers: data?.graph?.markers ?? baseEvents.filter((event) => event.purchase || event.proposal || event.settlement).map((event) => ({ t: event.at, eventId: event.id })),
+    markers: data?.graph?.markers ?? latestRunEvents.filter((event) => event.purchase || event.proposal || event.settlement).map((event) => ({ t: event.at, eventId: event.id })),
     halted,
     connected,
     phase: awaiting ? "awaiting" as const : working ? "running" as const : "idle" as const,
@@ -194,6 +211,17 @@ export function DinoWorkspace() {
         items.push({ type: "user", id: message.id, at: message.at, text: message.text });
       }
     }
+    const mappedById = new Map(baseEvents.map((event) => [event.id, event]));
+    // Insert a completed-run thought block after each run's last non-meta event.
+    const thoughtsByRun = new Map<string, string[]>();
+    for (const event of rawEvents) {
+      if (event.kind !== "agent.thinking" || !event.runId) continue;
+      const list = thoughtsByRun.get(event.runId) ?? [];
+      const line = event.detail || event.title || "";
+      if (line) list.push(line);
+      thoughtsByRun.set(event.runId, list);
+    }
+    const emittedThoughtRuns = new Set<string>();
     for (const event of rawEvents) {
       if (event.kind === "user.message") {
         items.push({
@@ -205,32 +233,39 @@ export function DinoWorkspace() {
         continue;
       }
       if (event.kind === "agent.thinking") continue;
-      const mapped = toEvent(event, receipts);
+      // Skip operational band-check cards that only duplicate the conclusion body.
+      if (
+        event.kind === "analysis.completed"
+        && typeof event.detail === "string"
+        && /all allocation bands are satisfied/i.test(event.detail)
+      ) {
+        continue;
+      }
+      const mapped = mappedById.get(event.id) ?? toEvent(event, receipts);
       items.push({
         type: "event",
         id: event.id,
         at: event.occurredAt ? new Date(event.occurredAt).getTime() : Date.now(),
         event: mapped,
       });
+      if (event.kind === "run.completed" && event.runId && !emittedThoughtRuns.has(event.runId)) {
+        const sentences = thoughtsByRun.get(event.runId) ?? [];
+        if (sentences.length && event.runId !== thoughtRunId) {
+          emittedThoughtRuns.add(event.runId);
+          items.push({
+            type: "thoughts",
+            id: `thoughts-${event.runId}`,
+            at: (event.occurredAt ? new Date(event.occurredAt).getTime() : Date.now()) - 1,
+            sentences,
+            working: false,
+            startedAt: event.occurredAt ? new Date(event.occurredAt).getTime() : Date.now(),
+          });
+        }
+      }
     }
-    if (thoughtSentences.length > 0 || working) {
-      const firstThought = rawEvents.find((event) => event.kind === "agent.thinking");
-      items.push({
-        type: "thoughts",
-        id: `thoughts-${latestRunId ?? "live"}`,
-        at: firstThought?.occurredAt ? new Date(firstThought.occurredAt).getTime() : thoughtStartedAt ?? Date.now(),
-        sentences: thoughtSentences,
-        working,
-        startedAt: thoughtStartedAt ?? (firstThought?.occurredAt ? new Date(firstThought.occurredAt).getTime() : Date.now()),
-      });
-    }
-    return items.sort((a, b) => {
-      // Keep the live thought block near the newest activity while working.
-      if (a.type === "thoughts" && working) return 1;
-      if (b.type === "thoughts" && working) return -1;
-      return a.at - b.at;
-    });
-  }, [localUserMessages, serverUserTexts, rawEvents, receipts, thoughtSentences, working, latestRunId, thoughtStartedAt]);
+    // Live thinking lives in the Right now rail — avoid a second blank Thinking card in chat.
+    return items.sort((a, b) => a.at - b.at);
+  }, [localUserMessages, serverUserTexts, rawEvents, receipts, baseEvents, thoughtRunId]);
 
   useEffect(() => {
     if (working && thoughtStartedAt === null) setThoughtStartedAt(Date.now());
@@ -581,14 +616,13 @@ export function DinoWorkspace() {
                         return <UserMessage key={item.id} text={item.text} at={item.at} />;
                       }
                       if (item.type === "thoughts") {
-                        // Sticky under header / right-now card already shows the live stream;
-                        // keep an inline copy in the main rail while the agent is working.
-                        if (rightNowPlacement === "Sticky under header" && !item.working) return null;
+                        // Live thoughts render in Right now; chat only keeps completed-run traces.
+                        if (item.working) return null;
                         return (
                           <div key={item.id} className="rounded-lg border border-line bg-card/80 px-3.5 py-3">
                             <ThinkingReasoning
                               sentences={item.sentences}
-                              working={item.working}
+                              working={false}
                               startedAt={item.startedAt}
                               resetKey={item.id}
                               placeholder="Reading the request and gathering live market context…"

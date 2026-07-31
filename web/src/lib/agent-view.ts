@@ -45,6 +45,24 @@ function lifecycle(kind: string): LifecycleStep {
   return "record";
 }
 
+/** Upgrade submitted settlements once a verified sibling exists in the same run feed. */
+export function reconcileSettlements(events: AgentEvent[]): AgentEvent[] {
+  const verified = events.find((event) => event.kind === "trade.verified" && event.settlement?.status === "confirmed");
+  if (!verified?.settlement) return events;
+  return events.map((event) => {
+    if (event.kind !== "trade.submitted" || !event.settlement || event.settlement.status === "confirmed") return event;
+    return {
+      ...event,
+      settlement: {
+        ...event.settlement,
+        status: "confirmed",
+        txHash: verified.settlement!.txHash || event.settlement.txHash,
+        confirmedAt: verified.settlement!.confirmedAt ?? verified.at,
+      },
+    };
+  });
+}
+
 export function toEvent(event: RunEvent, receipts: Receipt[] = []): AgentEvent {
   const payload = event.payload ?? {};
   const payloadResult = payload.result && typeof payload.result === "object" ? payload.result as Record<string, unknown> : undefined;
