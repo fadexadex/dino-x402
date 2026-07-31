@@ -175,9 +175,9 @@ export class AgentRunner {
         });
         if (response.status === 402) {
           challengeSeen = true;
-          event("payment.required", "HTTP 402 received", "The data server quoted an x402 payment requirement.", decodeRequired(response.headers.get("payment-required")));
+          event("payment.required", "Payment required for market data", "The data service asked for a small on-chain payment before unlocking the price.", decodeRequired(response.headers.get("payment-required")));
         } else {
-          event("payment.response", `HTTP ${response.status} received`, "The signed request was returned by the paid endpoint.", { status: response.status });
+          event("payment.response", `Data response received (${response.status})`, "The paid request came back from the market-data service.", { status: response.status });
         }
         return response;
       };
@@ -195,19 +195,19 @@ export class AgentRunner {
       }
       const transactionId = settlement.transaction;
       const hashscanUrl = hashscanTransactionUrl(transactionId);
-      event("payment.settled", "Settled on Hedera testnet", "The x402 payment is confirmed and independently verifiable.", {
+      event("payment.settled", "Payment confirmed", "The tiny on-chain payment succeeded and the market data is unlocked.", {
         success: true,
         transactionId,
         payer: settlement.payer,
         hashscanUrl,
       });
-      event("data.received", "Paid signal unlocked", `${plan.productId} data is now available to the agent.`, {
+      event("data.received", "Market data unlocked", `${plan.productId} data is now available to the agent.`, {
         productId: plan.productId,
         providerId: body && typeof body === "object" ? (body as Record<string, unknown>).providerId : undefined,
       });
 
       const recommendation = await this.advisor.analyze({ objective, portfolio, plan, paidData: body });
-      event("analysis.completed", "Portfolio recommendation ready", recommendation.summary, {
+      event("analysis.completed", "Recommendation ready", recommendation.summary, {
         source: recommendation.source,
         fallbackReason: recommendation.fallbackReason,
         action: recommendation.action,
