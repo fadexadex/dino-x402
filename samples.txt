@@ -1,0 +1,2757 @@
+// Different login states for the agents while it is thinking.
+
+"use client";
+
+import { useEffect, useState } from "react";
+
+/* ─────────────────────────────────────────────────────────
+ * LOADING STATE — pixel-grid loader for long-running work
+ *
+ * Variants:
+ *   Drive  — square cells, chevron wavefront driving right;
+ *            the 650ms cycle is shorter than the sweep, so
+ *            two fronts are always in flight
+ *   Dots   — same wavefront, circular cells
+ *   Orbit  — a comet lapping the grid perimeter
+ *
+ * Paired with a shimmering label and a live elapsed timer
+ * in mono tabular figures. Reduced motion freezes the grid
+ * to its dim state; the timer still ticks.
+ * ───────────────────────────────────────────────────────── */
+
+const chevron = Array.from({ length: 9 }, (_, i) => {
+  const r = Math.floor(i / 3), c = i % 3;
+  return (c + Math.abs(r - 1)) * 90;
+});
+
+const ORBIT_ORDER = [0, 1, 2, 5, 8, 7, 6, 3];
+const orbit = Array.from({ length: 9 }, (_, i) => {
+  const k = ORBIT_ORDER.indexOf(i);
+  return k === -1 ? null : k * 110;
+});
+
+const PATTERNS: Record<string, { delays: (number | null)[]; dur: number; round: boolean }> = {
+  Drive: { delays: chevron, dur: 650, round: false },
+  Dots: { delays: chevron, dur: 650, round: true },
+  Orbit: { delays: orbit, dur: 950, round: false },
+};
+
+function useElapsed() {
+  const [ds, setDs] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setDs((d) => d + 1), 100);
+    return () => clearInterval(t);
+  }, []);
+  const total = ds / 10;
+  if (total < 60) return `${total.toFixed(1)}s`;
+  return `${Math.floor(total / 60)}m ${(total % 60).toFixed(1)}s`;
+}
+
+export default function LoadingState({
+  label = "Churning",
+  variant = "Drive",
+}: {
+  label?: string;
+  variant?: string;
+}) {
+  const elapsed = useElapsed();
+  const { delays, dur, round } = PATTERNS[variant] ?? PATTERNS.Drive;
+
+  return (
+    <div className="flex w-fit items-center gap-2.5">
+      <span aria-hidden className="grid grid-cols-[repeat(3,4px)] gap-[1.5px]">
+        {delays.map((d, i) => (
+          <span
+            key={i}
+            className={`size-[4px] bg-ink ${round ? "rounded-full" : "rounded-[1px]"}`}
+            style={{
+              opacity: d === null ? 0.07 : 0.15,
+              animation:
+                d === null ? "none" : `pixel-on ${dur}ms ease-in-out ${d}ms infinite`,
+            }}
+          />
+        ))}
+      </span>
+      <span
+        className="bg-clip-text text-[13px] font-medium text-transparent"
+        style={{
+          backgroundImage:
+            "linear-gradient(90deg, var(--ink-3) 35%, var(--ink) 50%, var(--ink-3) 65%)",
+          backgroundSize: "200% 100%",
+          animation: "shimmer-text 1.4s linear infinite",
+        }}
+      >
+        {label}
+      </span>
+      <span className="font-mono text-[12px] text-ink-3 tabular-nums">
+        {elapsed}
+      </span>
+    </div>
+  );
+}
+
+
+// Different thinking components.
+
+"use client";
+
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+
+/* ─────────────────────────────────────────────────────────
+ * THINKING — expandable agent trace, four variants
+ *
+ *   Steps      step list with spinner → muted checks
+ *   Reasoning  prose reasoning that expands, then settles
+ *   Search     web-search trace: query + sources read
+ *   Coding     tool trace: files read, edits, commands
+ *
+ * The trace runs once, settles, and remains expandable.
+ * ───────────────────────────────────────────────────────── */
+
+const STAGES = [800, 600, 1800, 2600, 1600];
+
+function useSequence(steps: number[]) {
+  const [stage, setStage] = useState(0);
+  useEffect(() => {
+    if (stage >= steps.length - 1) return;
+    const t = setTimeout(() => setStage((s) => s + 1), steps[stage]);
+    return () => clearTimeout(t);
+  }, [stage, steps]);
+  return stage;
+}
+
+type Row = {
+  primary: string;
+  secondary?: string;
+  mono?: boolean;
+  add?: number;
+  del?: number;
+  href?: string;
+};
+
+const VARIANTS: Record<
+  string,
+  { active: string; done: string; rows: Row[]; query?: string }
+> = {
+  Steps: {
+    active: "Thinking",
+    done: "Thought for 4 seconds",
+    rows: [
+      { primary: "Reading flavor briefs" },
+      { primary: "Scanning supplier lists" },
+      { primary: "Comparing tasting notes", secondary: "6 flavors" },
+      { primary: "Writing the scoop report" },
+    ],
+  },
+  Reasoning: {
+    active: "Thinking",
+    done: "Thought for 4 seconds",
+    rows: [
+      { primary: "Summer demand spikes for stone-fruit flavors — peach and apricot lead." },
+      { primary: "I should check cone inventory before promoting a waffle-bowl special." },
+    ],
+  },
+  Search: {
+    active: "Searching the web",
+    done: "Searched the web",
+    query: "best waffle cone supplier",
+    rows: [
+      { primary: "Joy Cone", secondary: "joycone.com", href: "https://joycone.com/fs_products/waffle-cones/" },
+      { primary: "WebstaurantStore", secondary: "webstaurantstore.com", href: "https://www.webstaurantstore.com/ice-cream-shop-supplies.html" },
+      { primary: "The Konery", secondary: "thekonery.com", href: "https://www.thekonery.com/" },
+    ],
+  },
+  Coding: {
+    active: "Running tools",
+    done: "Ran 3 tools",
+    rows: [
+      { primary: "Read", secondary: "flavors.ts", mono: true },
+      { primary: "Edit", secondary: "ChurnSchedule.tsx", mono: true, add: 74, del: 41 },
+      { primary: "Run", secondary: "npm run freeze", mono: true },
+    ],
+  },
+};
+
+function Dot({ tone }: { tone: string }) {
+  return (
+    <span className={`flex size-3.5 shrink-0 items-center justify-center rounded-full text-white ${tone}`}>
+      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M3.5 12h17M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+      </svg>
+    </span>
+  );
+}
+
+const TONES = ["bg-accent", "bg-orange", "bg-green"];
+
+export default function ThinkingState({ variant = "Steps" }: { variant?: string }) {
+  const stage = useSequence(STAGES);
+  const [manualExpanded, setManualExpanded] = useState<boolean | null>(null);
+  const [selectedTool, setSelectedTool] = useState<string | null>(null);
+  const v = VARIANTS[variant] ?? VARIANTS.Steps;
+  const autoExpanded = stage >= 1 && stage < 4;
+  const expanded = manualExpanded ?? autoExpanded;
+  const working = stage < 3;
+  const visible = stage < 2 ? 0 : stage === 2 ? Math.min(2, v.rows.length) : v.rows.length;
+  const traceRef = useRef<HTMLDivElement>(null);
+  const [lineHeight, setLineHeight] = useState(0);
+  useLayoutEffect(() => {
+    if (traceRef.current) setLineHeight(traceRef.current.offsetHeight);
+  }, [visible, expanded, variant, stage]);
+
+  return (
+    <div key={variant} className="flex min-h-[176px] w-full max-w-95 flex-col">
+      {/* header — shared across variants */}
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setManualExpanded((current) => !(current ?? autoExpanded))}
+        className="-mx-1.5 flex w-fit items-center gap-2 rounded-control px-1.5 py-1
+          transition-colors duration-100 hover:bg-hover-2"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill={working ? "var(--ink-2)" : "var(--ink-3)"}>
+          <path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z" />
+        </svg>
+        {working ? (
+          <span
+            className="bg-clip-text text-[13px] font-medium whitespace-nowrap text-transparent"
+            style={{
+              backgroundImage:
+                "linear-gradient(90deg, var(--ink-3) 35%, var(--ink) 50%, var(--ink-3) 65%)",
+              backgroundSize: "200% 100%",
+              animation: "shimmer-text 1.4s linear infinite",
+            }}
+          >
+            {v.active}
+          </span>
+        ) : (
+          <span
+            className="text-[13px] font-medium whitespace-nowrap text-ink-2"
+            style={{ animation: "fade-in 350ms ease-out both" }}
+          >
+            {v.done}
+          </span>
+        )}
+        <svg
+          width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--ink-3)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+          className="transition-transform duration-300"
+          style={{ transform: expanded ? "rotate(180deg)" : "rotate(0)" }}
+        >
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+      </button>
+
+      {/* expandable trace */}
+      <div
+        className="grid transition-[grid-template-rows,opacity] duration-400"
+        style={{
+          gridTemplateRows: expanded ? "1fr" : "0fr",
+          opacity: expanded ? 1 : 0,
+          transitionTimingFunction: "cubic-bezier(0.23, 1, 0.32, 1)",
+        }}
+      >
+        <div className="overflow-hidden">
+          <div className="relative mt-1 ml-[5px] pl-4">
+            <span
+              aria-hidden
+              className="absolute left-[3px] w-px bg-line"
+              style={{ top: -8, height: lineHeight ? lineHeight - 2 : 0, transition: "height 500ms cubic-bezier(0.23,1,0.32,1)" }}
+            />
+            <div ref={traceRef} className="flex flex-col gap-1 py-1">
+            {v.query && (
+              <div className="flex h-6 items-center gap-2 px-1.5" style={{ animation: expanded ? "fade-up 300ms cubic-bezier(0.23,1,0.32,1) both" : undefined }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--ink-3)" strokeWidth="2" strokeLinecap="round" className="shrink-0">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="M21 21l-4.3-4.3" />
+                </svg>
+                <span className="text-[12.5px] text-ink-2">{v.query}</span>
+              </div>
+            )}
+            {v.rows.slice(0, visible).map((row, i) => {
+              const content = (
+                <>
+                {variant === "Search" && <Dot tone={TONES[i % 3]} />}
+                {variant === "Steps" && (
+                  i < visible - 1 || !working ? (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--ink-3)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                      <path d="M20 6L9 17l-5-5" />
+                    </svg>
+                  ) : (
+                    <span className="size-3 shrink-0 rounded-full border-[1.5px] border-line-strong border-t-ink-2" style={{ animation: "spin 700ms linear infinite" }} />
+                  )
+                )}
+                <span className={`min-w-0 truncate text-[12.5px] ${variant === "Reasoning" ? "whitespace-normal leading-relaxed text-ink-2" : "font-medium text-ink"} ${variant === "Search" ? "animated-underline" : ""}`}>
+                  {row.primary}
+                </span>
+                {row.secondary && (
+                  <span className={`shrink-0 text-[11.5px] text-ink-3 ${row.mono ? "font-mono" : ""}`}>
+                    {row.secondary}
+                  </span>
+                )}
+                {row.add !== undefined && (
+                  <span className="shrink-0 font-mono text-[11px] tabular-nums">
+                    <span className="text-green">+{row.add}</span>{" "}
+                    <span className="text-red">−{row.del}</span>
+                  </span>
+                )}
+                </>
+              );
+              const rowClass = "flex min-h-7 w-full items-center gap-2 rounded-[6px] px-1.5 py-0.5 text-left";
+              const animation = { animation: `fade-up 320ms cubic-bezier(0.23,1,0.32,1) ${i * 120}ms both` };
+
+              if (variant === "Search") {
+                return (
+                  <a
+                    key={row.primary}
+                    href={row.href}
+                    target="_blank"
+                    rel="noreferrer"
+                    className={`${rowClass} transition-colors duration-150 hover:bg-hover`}
+                    style={animation}
+                  >
+                    {content}
+                  </a>
+                );
+              }
+
+              if (variant === "Coding") {
+                const selected = selectedTool === row.primary;
+                return (
+                  <button
+                    key={row.primary}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => setSelectedTool(selected ? null : row.primary)}
+                    className={`${rowClass} transition-colors duration-150 ${selected ? "bg-inset" : "hover:bg-hover"}`}
+                    style={animation}
+                  >
+                    {content}
+                  </button>
+                );
+              }
+
+              return (
+                <div key={row.primary} className={rowClass} style={animation}>
+                  {content}
+                </div>
+              );
+            })}
+            {variant === "Search" && stage >= 3 && (
+              <span className="text-[12px] text-ink-3" style={{ animation: "fade-in 300ms ease-out both" }}>
+                +7 more
+              </span>
+            )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// approval 
+"use client";
+
+import { useState } from "react";
+
+/* ─────────────────────────────────────────────────────────
+ * APPROVAL CARD (human-in-the-loop)
+ * One question at a time; elongated pills show progress;
+ * the circular arrow up top advances (↑ sends on the last).
+ * Choices, paging, and submission are directly controlled.
+ * ───────────────────────────────────────────────────────── */
+
+const QUESTIONS = [
+  {
+    q: "How many flavors should we launch?",
+    type: "radio" as const,
+    options: ["Three (core line)", "Five (full case)", "Just one hero"],
+  },
+  {
+    q: "Which mix-ins should we stock?",
+    type: "check" as const,
+    options: ["Chocolate chips", "Waffle bits", "Sprinkles"],
+  },
+  {
+    q: "Which market do we enter first?",
+    type: "radio" as const,
+    options: ["Food trucks", "Grocery freezers", "Scoop shops"],
+  },
+];
+
+export default function ApprovalCard() {
+  const [qi, setQi] = useState(0);
+  const [answers, setAnswers] = useState<Record<number, number[]>>({});
+  const [custom, setCustom] = useState<Record<number, string>>({});
+  const [sent, setSent] = useState(false);
+  const [open, setOpen] = useState(true);
+  const question = QUESTIONS[qi];
+  const last = qi === QUESTIONS.length - 1;
+  const selected = answers[qi] ?? [];
+  const hasAnswer = selected.length > 0 || Boolean(custom[qi]?.trim());
+
+  const toggle = (index: number) => {
+    setAnswers((current) => {
+      const picked = current[qi] ?? [];
+      const next = question.type === "radio"
+        ? [index]
+        : picked.includes(index)
+          ? picked.filter((item) => item !== index)
+          : [...picked, index];
+      return { ...current, [qi]: next };
+    });
+    if (question.type === "radio") {
+      setCustom((current) => ({ ...current, [qi]: "" }));
+      // single-choice auto-advances
+      window.setTimeout(() => {
+        if (qi === QUESTIONS.length - 1) setSent(true);
+        else setQi((current) => Math.min(QUESTIONS.length - 1, current + 1));
+      }, 480);
+    }
+  };
+
+  const reset = () => {
+    setQi(0);
+    setAnswers({});
+    setCustom({});
+    setSent(false);
+    setOpen(true);
+  };
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="rounded-control bg-surface px-3 py-2 text-[12.5px] font-medium text-ink shadow-btn transition-colors duration-150 hover:bg-hover">
+        Open approval
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex min-h-[196px] w-full max-w-80 flex-col items-stretch">
+      <div className="w-full self-start overflow-hidden rounded-card bg-surface shadow-card">
+        {sent ? (
+          <div className="flex h-37 flex-col items-center justify-center gap-2">
+            <span
+              className="flex size-6 items-center justify-center rounded-full bg-green text-white"
+              style={{ animation: "pop-in 300ms cubic-bezier(0.23,1,0.32,1) both" }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+            </span>
+            <span className="text-[13px] font-medium text-ink" style={{ animation: "fade-up 350ms cubic-bezier(0.23,1,0.32,1) 100ms both" }}>
+              Answers sent
+            </span>
+            <button type="button" onClick={reset} className="text-[12px] font-medium text-accent-ink hover:underline">
+              Start over
+            </button>
+          </div>
+        ) : (
+          <div key={qi} className="primitive-card-pad" style={{ animation: "fade-up 350ms cubic-bezier(0.23,1,0.32,1) both" }}>
+            <div className="flex items-start justify-between gap-3">
+              <span className="text-[13px] font-medium text-ink">{question.q}</span>
+              <button
+                type="button"
+                aria-label="Dismiss"
+                onClick={() => setOpen(false)}
+                className="primitive-icon-button shrink-0
+                  text-ink-3 transition-colors duration-100 hover:bg-hover hover:text-ink"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="mt-2 flex flex-col gap-0.5">
+              {question.options.map((option, i) => {
+                const on = selected.includes(i);
+                return (
+                  <button
+                    key={option}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => toggle(i)}
+                    className="-mx-1.5 flex items-center gap-2 rounded-control px-1.5 py-1 text-left transition-colors duration-100 hover:bg-hover"
+                  >
+                    <span
+                      className={`flex size-4 shrink-0 items-center justify-center transition-colors duration-200
+                        ${question.type === "radio" ? "rounded-full" : "rounded-[5px]"}
+                        ${on ? "bg-ink text-canvas" : "shadow-[inset_0_0_0_1.5px_var(--line-strong)] text-transparent"}`}
+                    >
+                      {question.type === "radio" ? (
+                        <span className="size-1.5 rounded-full bg-canvas transition-transform duration-200" style={{ transform: on ? "scale(1)" : "scale(0)" }} />
+                      ) : (
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+                      )}
+                    </span>
+                    <span className={`text-[13px] transition-colors duration-200 ${on ? "text-ink" : "text-ink-2"}`}>
+                      {option}
+                    </span>
+                  </button>
+                );
+              })}
+              <label className="-mx-1.5 flex items-center gap-2 rounded-control px-1.5 py-1 transition-colors duration-100 focus-within:bg-hover hover:bg-hover">
+                <span aria-hidden="true" className="size-4 shrink-0" />
+                <input
+                  value={custom[qi] ?? ""}
+                  onChange={(event) => {
+                    setCustom((current) => ({ ...current, [qi]: event.target.value }));
+                    if (question.type === "radio") setAnswers((current) => ({ ...current, [qi]: [] }));
+                  }}
+                  placeholder="Type something…"
+                  aria-label="Custom answer"
+                  className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-3"
+                />
+              </label>
+            </div>
+          </div>
+        )}
+
+        {/* footer — ring-dot pager + send arrow */}
+        <div className="primitive-card-footer flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            <button
+              type="button"
+              aria-label="Previous"
+              disabled={qi === 0 || sent}
+              onClick={() => setQi((current) => Math.max(0, current - 1))}
+              className="flex size-6 items-center justify-center rounded-[5px] text-ink-3 transition-colors duration-100 enabled:hover:bg-hover enabled:hover:text-ink-2 disabled:opacity-35"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
+            </button>
+            <span className="flex items-center gap-1">
+              {QUESTIONS.map((_, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  aria-label={`Go to question ${i + 1}`}
+                  aria-current={i === qi && !sent ? "step" : undefined}
+                  disabled={sent}
+                  onClick={() => setQi(i)}
+                  className="rounded-full transition-all duration-300 disabled:cursor-default"
+                  style={
+                    i === qi && !sent
+                      ? { width: 9, height: 9, border: "2.5px solid var(--ink)" }
+                      : sent || i < qi
+                        ? { width: 7, height: 7, background: "var(--ink-3)" }
+                        : { width: 7, height: 7, border: "1.5px solid var(--ink-3)" }
+                  }
+                />
+              ))}
+            </span>
+            <button
+              type="button"
+              aria-label="Next"
+              disabled={last || sent}
+              onClick={() => setQi((current) => Math.min(QUESTIONS.length - 1, current + 1))}
+              className="flex size-6 items-center justify-center rounded-[5px] text-ink-3 transition-colors duration-100 enabled:hover:bg-hover enabled:hover:text-ink-2 disabled:opacity-35"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
+          </span>
+          {!sent && (
+            <button
+              type="button"
+              aria-label={last ? "Send answers" : "Next question"}
+              disabled={!hasAnswer}
+              onClick={() => last ? setSent(true) : setQi((current) => current + 1)}
+              className="flex size-7 items-center justify-center rounded-[8px] transition-[background-color,color,transform] duration-200 enabled:active:scale-[0.96]"
+              style={{
+                background: hasAnswer ? "var(--ink)" : "var(--field)",
+                color: hasAnswer ? "var(--surface)" : "var(--ink-3)",
+                boxShadow: hasAnswer ? "inset 0 1px 0 rgba(255,255,255,0.14)" : "var(--shadow-btn)",
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 19V5M5 12l7-7 7 7" />
+              </svg>
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// I quite like this thinking.
+
+import styles from "./ThinkingReasoning.module.css";
+import { useEffect, useRef, useState } from "react";
+
+const SENTENCES = [
+  "Reading the request and the current selection, then locating the jwt.verify call inside the auth middleware.",
+  "The verify call sets no algorithms allowlist, so a token signed with 'none' or a weak cipher could be accepted.",
+  "Tracing where the signing secret is loaded from and confirming it is never logged or sent back to the client.",
+  "Planning to pin the algorithm to HS256 and to validate the issuer and audience claims on every incoming request.",
+  "Scanning the existing tests around the middleware so the fix stays covered and nothing downstream regresses.",
+  "Drafting the patch with a focused regression test that rejects tampered, expired, and unsigned tokens.",
+];
+
+// Per-sentence reveal cadence (ms). Sums to ~5s of "thinking".
+const DELAYS = [700, 900, 800, 850, 800, 900];
+const THINK_MS = DELAYS.reduce((a, b) => a + b, 0);
+const ELAPSED_S = Math.max(1, Math.round(THINK_MS / 1000));
+const COLLAPSE_BEAT = 360;
+
+// Geometry — keep in sync with the CSS below.
+const SENT_H = 40; // 2 lines × 20px
+const GAP = 4;
+const MAX_H = 180; // viewport grows with content up to this, then scrolls
+const FADE = 16; // top/bottom fade once the viewport is capped
+
+export function ThinkingReasoning() {
+  // "thinking" | "done"
+  const [phase, setPhase] = useState("thinking");
+  const [revealed, setRevealed] = useState(0);
+  // While thinking the reasoning is always open; once done it folds into
+  // the summary and the user can toggle it back open.
+  const [open, setOpen] = useState(false);
+  // Which soft fades to show while scrolling the unfolded reasoning.
+  const [fade, setFade] = useState({ top: false, bottom: true });
+  const viewportRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      setRevealed(SENTENCES.length);
+      setPhase("done");
+      return;
+    }
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const at = (ms: number, fn: () => void) => timers.push(setTimeout(fn, ms));
+    let t = 0;
+    DELAYS.forEach((d, i) => {
+      t += d;
+      at(t, () => setRevealed(i + 1));
+    });
+    at(THINK_MS + COLLAPSE_BEAT, () => setPhase("done"));
+    return () => timers.forEach(clearTimeout);
+  }, []);
+
+  const done = phase === "done";
+  const expanded = done ? open : true;
+  const count = done ? SENTENCES.length : revealed;
+  const contentH = count > 0 ? count * SENT_H + (count - 1) * GAP : 0;
+  const capped = contentH > MAX_H;
+  const viewH = capped ? MAX_H : contentH;
+  const scrollable = done && open;
+  const translate = scrollable ? 0 : capped ? MAX_H - FADE - contentH : 0;
+
+  const showTop = scrollable ? fade.top : capped;
+  const showBottom = scrollable ? fade.bottom : capped;
+  const mask = capped
+    ? `linear-gradient(to bottom, transparent 0, #000 ${showTop ? FADE : 0}px, #000 calc(100% - ${showBottom ? FADE : 0}px), transparent 100%)`
+    : "none";
+
+  const onScroll = () => {
+    const el = viewportRef.current;
+    if (!el) return;
+    setFade({
+      top: el.scrollTop > 1,
+      bottom: el.scrollTop + el.clientHeight < el.scrollHeight - 1,
+    });
+  };
+
+  const toggle = () => {
+    const next = !open;
+    if (next) {
+      setFade({ top: false, bottom: true });
+      if (viewportRef.current) viewportRef.current.scrollTop = 0;
+    }
+    setOpen(next);
+  };
+
+  return (
+    <div className={styles.tr}>
+      <button
+        type="button"
+        className={styles.trHeader + (done ? " " + styles.isClickable : "")}
+        aria-expanded={expanded}
+        aria-label="Toggle thought"
+        onClick={done ? toggle : undefined}
+      >
+        {done ? (
+          <span className={styles.trLabel}>
+            <span className={styles.trVerb}>Thought</span> for {ELAPSED_S}s
+          </span>
+        ) : (
+          <span className={styles.trLabel + " " + styles.trShimmer}>Thinking…</span>
+        )}
+        {done && (
+          <svg className={styles.trChevron} viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+            <path d="m4.5 15.75 7.5-7.5 7.5 7.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        )}
+      </button>
+
+      <div className={styles.trCollapsible + (expanded ? "" : " " + styles.isCollapsed)}>
+        <div className={styles.trInner}>
+          <div
+            ref={viewportRef}
+            className={styles.trViewport + (scrollable ? " " + styles.isScroll : "")}
+            style={{ height: `${viewH}px`, WebkitMaskImage: mask, maskImage: mask }}
+            onScroll={scrollable ? onScroll : undefined}
+          >
+            <div className={styles.trStream} style={{ transform: `translateY(${translate}px)` }}>
+              {SENTENCES.slice(0, count).map((line, i) => (
+                <p key={i} className={styles.trSentence}>{line}</p>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+the css module: 
+.tr {
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  max-width: 100%;
+  /* anchor the header: header (20) + viewport margin (6) + max viewport (180) */
+  min-height: 206px;
+  font-family: "Inter", system-ui, sans-serif;
+  /* soft fade-in on (re)mount */
+  animation: tr-block-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes tr-block-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.trHeader {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  min-height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: default;
+}
+.trHeader.isClickable { cursor: pointer; }
+.trLabel {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 500;
+  /* softer than "Thought" so "for Ns" matches the dark-mode hierarchy */
+  color: color-mix(in srgb, #a1a1a1 68%, transparent);
+  letter-spacing: -0.005em;
+}
+.trVerb { color: #a1a1a1; }
+.trChevron {
+  color: #a1a1a1;
+  transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  /* base path is an up caret; collapsed summary points down */
+  transform: rotate(180deg);
+}
+.trHeader[aria-expanded="true"] .trChevron { transform: rotate(0deg); }
+.trHeader.isClickable:hover .trChevron { color: #a1a1a1; }
+.trCollapsible {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition: grid-template-rows 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 220ms ease;
+}
+.trCollapsible.isCollapsed {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
+}
+.trInner { min-height: 0; overflow: hidden; }
+/* viewport: grows with the content, then caps at MAX_H. While thinking
+   the stream auto-scrolls behind a soft fade; once unfolded by the user
+   it becomes natively scrollable and the fades follow the scroll position. */
+.trViewport {
+  margin-top: 6px;
+  overflow: hidden;
+  transition: height 360ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.trViewport.isScroll {
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.trViewport.isScroll::-webkit-scrollbar { display: none; }
+.trStream {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: transform 560ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+.trSentence {
+  margin: 0;
+  height: 40px;
+  line-height: 20px;
+  font-size: 13px;
+  font-weight: 425;
+  color: #a1a1a1;
+  letter-spacing: -0.005em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  animation: tr-sentence-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes tr-sentence-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+/* label-shine: a soft brightness valley sweeps through the text */
+.trShimmer {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background: linear-gradient(
+    90deg,
+    #a1a1a1 0%, #a1a1a1 30%,
+    rgba(161, 161, 161, 0.45) 45%, rgba(161, 161, 161, 0.45) 55%,
+    #a1a1a1 70%, #a1a1a1 100%
+  );
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: tr-shine 2.25s cubic-bezier(0.25, 0.1, 0.25, 1) infinite;
+}
+@keyframes tr-shine {
+  0%, 18% { background-position: 100% 0; }
+  82%, 100% { background-position: 0% 0; }
+}
+@media (prefers-color-scheme: dark) {
+  .trLabel { color: #737373; }
+  .trVerb { color: #a3a3a3; }
+  .trChevron { color: #737373; }
+  .trSentence { color: #737373; }
+  .trHeader.isClickable:hover .trChevron { color: #a3a3a3; }
+}
+
+// and state: 
+
+import styles from "./ThinkingState.module.css";
+
+export function ThinkingState() {
+  return <span className={styles.shimmer}>Thinking</span>;
+}
+
+// style 
+.shimmer {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 500;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background: linear-gradient(
+    90deg,
+    #a1a1a1 0%, #a1a1a1 30%,
+    rgba(161, 161, 161, 0.45) 45%, rgba(161, 161, 161, 0.45) 55%,
+    #a1a1a1 70%, #a1a1a1 100%
+  );
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: label-shine 2.25s cubic-bezier(0.25, 0.1, 0.25, 1) infinite;
+}
+@keyframes label-shine {
+  0%, 18% { background-position: 100% 0; }
+  82%, 100% { background-position: 0% 0; }
+}
+@media (prefers-color-scheme: dark) {
+  .shimmer { background: linear-gradient(90deg, #a1a1a1 0%, #a1a1a1 30%, rgba(161, 161, 161, 0.45) 45%, rgba(161, 161, 161, 0.45) 55%, #a1a1a1 70%, #a1a1a1 100%); background-size: 300% 100%; -webkit-background-clip: text; background-clip: text; }
+}
+
+
+// If you think that this will be relevant to what we are doing, here's some nice UI for todo.
+import styles from "./TodoList.module.css";
+import { useEffect, useRef, useState } from "react";
+
+const LABELS = [
+  "Scaffold the project structure",
+  "Build the component registry",
+  "Implement entitlement gating",
+  "Wire up Stripe checkout",
+  "Polish the landing page",
+];
+
+const START_DELAY = 700;
+const STEP_MS = 2250; // how long each task stays "working"
+
+const cls = (base: string, on?: boolean) => base + (on ? " " + styles.on : "");
+const CheckIcon = ({ on }: { on?: boolean }) => (
+  <svg className={cls(styles.todoIcon, on)} viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+    <path d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+const ArrowIcon = ({ on }: { on?: boolean }) => (
+  <svg className={cls(styles.todoIcon + " " + styles.strong, on)} viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+    <path d="m12.75 15 3-3m0 0-3-3m3 3h-7.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+const DashedIcon = ({ on }: { on?: boolean }) => (
+  <svg className={cls(styles.todoIcon, on)} viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+    <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.8" strokeDasharray="1.8 3.6" strokeLinecap="round" />
+  </svg>
+);
+
+// one character slot that rolls the old glyph up and the new one in on change
+const RollDigit = ({ char }: { char: string }) => {
+  const prev = useRef(char);
+  const [roll, setRoll] = useState<{ from: string; to: string } | null>(null);
+  const [up, setUp] = useState(false);
+  useEffect(() => {
+    if (char === prev.current) return;
+    const from = prev.current;
+    prev.current = char;
+    setRoll({ from, to: char });
+    setUp(false);
+    const raf = requestAnimationFrame(() => requestAnimationFrame(() => setUp(true)));
+    const done = setTimeout(() => setRoll(null), 380);
+    return () => { cancelAnimationFrame(raf); clearTimeout(done); };
+  }, [char]);
+  if (!roll) return <span className={styles.rollDigit}>{char}</span>;
+  return (
+    <span className={styles.rollDigit}>
+      <span className={cls(styles.rollInner, up)}>
+        <span>{roll.from}</span>
+        <span>{roll.to}</span>
+      </span>
+    </span>
+  );
+};
+const RollingCount = ({ value }: { value: string }) => (
+  <span className={styles.rollCount} aria-label={value}>
+    {value.split("").map((c, i) => <RollDigit key={i} char={c} />)}
+  </span>
+);
+const FilledCheckIcon = () => (
+  <svg className={styles.todoHeadCheck} viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+    <path fillRule="evenodd" clipRule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12Zm13.36-1.814a.75.75 0 1 0-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.14-.094l3.75-5.25Z" fill="currentColor" />
+  </svg>
+);
+
+export function TodoList() {
+  const [collapsed, setCollapsed] = useState(false);
+  // -1 = not started (plan shown), 0..n-1 = working on that task, n = all done
+  const [current, setCurrent] = useState(-1);
+  const n = LABELS.length;
+
+  useEffect(() => {
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      setCurrent(n);
+      return;
+    }
+    const timers = [setTimeout(() => setCurrent(0), START_DELAY)];
+    for (let i = 0; i < n; i++) {
+      timers.push(setTimeout(() => setCurrent(i + 1), START_DELAY + (i + 1) * STEP_MS));
+    }
+    return () => timers.forEach(clearTimeout);
+  }, [n]);
+
+  const started = current >= 0;
+  const allDone = current >= n;
+  const running = started && !allDone;
+  const pct = Math.round((Math.min(Math.max(current, 0), n) / n) * 100);
+
+  return (
+    <div className={styles.todo}>
+      <button
+        type="button"
+        className={styles.todoHead}
+        aria-expanded={!collapsed}
+        aria-label="Toggle to-dos"
+        onClick={() => setCollapsed((c) => !c)}
+      >
+        <span className={styles.todoHeadIcon}>
+          {allDone ? (
+            <FilledCheckIcon />
+          ) : running ? (
+            <span className={styles.todoHeadPie} style={{ ["--todo-pie" as string]: pct + "%" }} aria-hidden="true">
+              <svg className={styles.todoHeadPieRing} viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="10.5" fill="none" stroke="currentColor" strokeWidth="2.2" strokeDasharray="2.2 4.4" strokeLinecap="round" />
+              </svg>
+            </span>
+          ) : (
+            <svg className={styles.todoListIcon} viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          )}
+          <svg className={styles.todoChevron} viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+            <path d="m19.5 8.25-7.5 7.5-7.5-7.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
+        <span className={styles.todoTitle}>To-dos</span>
+        <span className={styles.todoCount}>
+          <RollingCount value={Math.min(Math.max(current, 0), n) + "/" + n} />
+        </span>
+      </button>
+
+      <div className={styles.todoCollapsible + (collapsed ? " " + styles.isCollapsed : "")}>
+        <div className={styles.todoInner}>
+          <ul className={styles.todoList}>
+            {LABELS.map((label, i) => {
+              const done = started && i < current;
+              const active = started && i === current && !allDone;
+              return (
+                <li
+                  key={i}
+                  className={styles.todoItem + (done ? " " + styles.done : active ? " " + styles.active : "")}
+                  style={{ ["--i" as string]: i }}
+                >
+                  <span className={styles.todoIconWrap}>
+                    <DashedIcon on={!done && !active} />
+                    <ArrowIcon on={active} />
+                    <CheckIcon on={done} />
+                  </span>
+                  <span className={styles.todoLabel} data-label={label}>{label}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+css: 
+
+.todo { font-family: "Inter", system-ui, sans-serif; font-size: 13px; color: #1a1a1a; background: #fff; border-radius: 8px; padding: 6px 12px 12px; box-shadow: 0 0 0 1px #e6e8ec; }
+.todoHead {
+  display: flex; width: 100%; align-items: center; gap: 8px;
+  padding: 0; border: 0; background: transparent; cursor: pointer;
+  color: #1a1a1a; font-size: 13px; min-height: 22px;
+}
+.todoHeadIcon { position: relative; width: 16px; height: 16px; flex: none; color: #a1a1a1; }
+.todoListIcon, .todoChevron, .todoHeadCheck { position: absolute; inset: 0; margin: auto; transition: opacity 140ms ease; }
+.todoListIcon, .todoChevron { width: 13px; height: 13px; }
+/* the solid check reads smaller than an outlined glyph, so render it full-size */
+.todoHeadCheck { width: 16px; height: 16px; color: #15a06a; }
+.todoChevron { opacity: 0; transition: opacity 140ms ease, transform 220ms ease; }
+.todoHead[aria-expanded="false"] .todoChevron { transform: rotate(-90deg); }
+.todoHead:hover .todoListIcon, .todoHead:hover .todoHeadPie, .todoHead:hover .todoHeadCheck { opacity: 0; }
+.todoHead:hover .todoChevron { opacity: 1; }
+.todoTitle { font-weight: 500; }
+.todoCount { margin-left: auto; color: #a1a1a1; font-variant-numeric: tabular-nums; }
+.rollCount { display: inline-flex; align-items: baseline; }
+.rollDigit { display: inline-block; overflow: hidden; height: 1em; line-height: 1em; }
+.rollInner { display: flex; flex-direction: column; transition: transform 350ms cubic-bezier(0.4, 0, 0.2, 1); }
+.rollInner span { height: 1em; line-height: 1em; }
+.rollInner.on { transform: translateY(-1em); }
+.rollStatic { display: inline-block; height: 1em; line-height: 1em; }
+.todoCollapsible {
+  display: grid; grid-template-rows: 1fr; opacity: 1;
+  transition: grid-template-rows 280ms ease, opacity 200ms ease;
+}
+.todoCollapsible.isCollapsed { grid-template-rows: 0fr; opacity: 0; pointer-events: none; }
+.todoInner { min-height: 0; overflow: hidden; }
+.todoList { list-style: none; display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 10px 0 0; }
+.todoItem {
+  display: flex; align-items: flex-start; gap: 9px; line-height: 18px; color: #a1a1a1;
+  animation: todo-item-in 360ms ease backwards;
+  animation-delay: calc(var(--i, 0) * 50ms);
+}
+@keyframes todo-item-in {
+  from { opacity: 0; transform: translateY(-7px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.todoIconWrap { position: relative; width: 16px; height: 16px; flex: none; margin-top: 1px; }
+.todoIcon {
+  position: absolute; inset: 0; width: 16px; height: 16px; color: #a1a1a1;
+  opacity: 0; transition: opacity 320ms ease;
+}
+.todoIcon.on { opacity: 1; }
+.todoIcon.strong { color: #1a1a1a; }
+.todoLabel {
+  position: relative; font-weight: 400; color: #a1a1a1;
+  transition: color 360ms ease;
+}
+/* crossfade the gray label into the dark shimmering active state */
+.todoLabel::before {
+  content: attr(data-label);
+  position: absolute; inset: 0;
+  background: linear-gradient(90deg, #1a1a1a 0%, #1a1a1a 30%, rgba(26, 26, 26, 0.45) 45%, rgba(26, 26, 26, 0.45) 55%, #1a1a1a 70%, #1a1a1a 100%);
+  background-size: 300% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent; -webkit-text-fill-color: transparent;
+  opacity: 0; transition: opacity 360ms ease; pointer-events: none;
+}
+.todoItem.active .todoLabel { color: transparent; }
+.todoItem.active .todoLabel::before {
+  opacity: 1;
+  animation: todo-shine 2.25s cubic-bezier(0.25, 0.1, 0.25, 1) infinite;
+}
+.todoItem.done .todoLabel { color: #a1a1a1; text-decoration: line-through; }
+@keyframes todo-shine {
+  0%, 18% { background-position: 100% 0; }
+  82%, 100% { background-position: 0% 0; }
+}
+
+/* running progress pie in the header — determinate fill = completed / total */
+@property --todo-pie {
+  syntax: "<percentage>";
+  inherits: true;
+  initial-value: 0%;
+}
+.todoHeadPie {
+  position: absolute; inset: 0; margin: auto; width: 13px; height: 13px; border-radius: 50%;
+  color: #1a1a1a;
+  transition: opacity 140ms ease, --todo-pie 400ms ease;
+}
+/* dotted outline matching the pending item circles */
+.todoHeadPieRing { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; color: #a1a1a1; }
+.todoHeadPie::after {
+  content: ""; position: absolute; inset: 2.6px; border-radius: 50%;
+  background: conic-gradient(currentColor var(--todo-pie, 0%), transparent 0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .todoItem { animation: none; }
+  .todoIcon, .todoLabel, .todoLabel::before { transition: none; }
+  .todoItem.active .todoLabel::before { animation: none; }
+}
+@media (prefers-color-scheme: dark) {
+  .todo { color: #f5f5f5; background: #1a1a1a; box-shadow: 0 0 0 1px #303030; }
+  .todoHead { color: #f5f5f5; }
+  .todoHeadCheck { color: #34d399; }
+  .todoHeadIcon { color: #737373; }
+  .todoCount { color: #737373; }
+  .todoHeadPieRing { color: #737373; }
+  .todoItem { color: #737373; }
+  .todoIcon { color: #737373; }
+  .todoLabel { color: #737373; }
+  .todoHeadPie { color: #f5f5f5; }
+  .todoIcon.strong { color: #f5f5f5; }
+  .todoLabel::before { background: linear-gradient(90deg, #f5f5f5 0%, #f5f5f5 30%, rgba(245, 245, 245, 0.45) 45%, rgba(245, 245, 245, 0.45) 55%, #f5f5f5 70%, #f5f5f5 100%); background-size: 300% 100%; -webkit-background-clip: text; background-clip: text; }
+}
+
+
+
+//table, quite useful too. 
+
+import styles from "./DataTable.module.css";
+import type { CSSProperties } from "react";
+
+// Official brand marks (paths from simple-icons, viewBox 0 0 24 24).
+const OPENAI =
+  "M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z";
+const ANTHROPIC =
+  "M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z";
+const META =
+  "M6.915 4.03c-1.968 0-3.683 1.28-4.871 3.113C.704 9.208 0 11.883 0 14.449c0 .706.07 1.369.21 1.973a6.624 6.624 0 0 0 .265.86 5.297 5.297 0 0 0 .371.761c.696 1.159 1.818 1.927 3.593 1.927 1.497 0 2.633-.671 3.965-2.444.76-1.012 1.144-1.626 2.663-4.32l.756-1.339.186-.325c.061.1.121.196.183.3l2.152 3.595c.724 1.21 1.665 2.556 2.47 3.314 1.046.987 1.992 1.22 3.06 1.22 1.075 0 1.876-.355 2.455-.843a3.743 3.743 0 0 0 .81-.973c.542-.939.861-2.127.861-3.745 0-2.72-.681-5.357-2.084-7.45-1.282-1.912-2.957-2.93-4.716-2.93-1.047 0-2.088.467-3.053 1.308-.652.57-1.257 1.29-1.82 2.05-.69-.875-1.335-1.547-1.958-2.056-1.182-.966-2.315-1.303-3.454-1.303zm10.16 2.053c1.147 0 2.188.758 2.992 1.999 1.132 1.748 1.647 4.195 1.647 6.4 0 1.548-.368 2.9-1.839 2.9-.58 0-1.027-.23-1.664-1.004-.496-.601-1.343-1.878-2.832-4.358l-.617-1.028a44.908 44.908 0 0 0-1.255-1.98c.07-.109.141-.224.211-.327 1.12-1.667 2.118-2.602 3.358-2.602zm-10.201.553c1.265 0 2.058.791 2.675 1.446.307.327.737.871 1.234 1.579l-1.02 1.566c-.757 1.163-1.882 3.017-2.837 4.338-1.191 1.649-1.81 1.817-2.486 1.817-.524 0-1.038-.237-1.383-.794-.263-.426-.464-1.13-.464-2.046 0-2.221.63-4.535 1.66-6.088.454-.687.964-1.226 1.533-1.533a2.264 2.264 0 0 1 1.088-.285z";
+
+type Row = { model: string; context: string; price: string };
+
+const ROWS: Row[] = [
+  { model: "gpt-4o", context: "128k", price: "$5.00" },
+  { model: "claude-3.5", context: "200k", price: "$3.00" },
+  { model: "llama-3.1", context: "128k", price: "$0.90" },
+];
+
+function brandOf(model: string) {
+  if (model.startsWith("gpt")) return { bg: "#10a37f", glyph: OPENAI };
+  if (model.startsWith("claude")) return { bg: "#d97757", glyph: ANTHROPIC };
+  return { bg: "#0866ff", glyph: META };
+}
+
+function ModelIcon({ model }: { model: string }) {
+  const brand = brandOf(model);
+  return (
+    <span className={styles.modelIcon} style={{ background: brand.bg } as CSSProperties}>
+      <svg viewBox="0 0 24 24" width="9" height="9" fill="currentColor" aria-hidden>
+        <path d={brand.glyph} />
+      </svg>
+    </span>
+  );
+}
+
+export function DataTable({ rows = ROWS }: { rows?: Row[] }) {
+  return (
+    <div className={styles.tbl}>
+      <div className={styles.tblHead}>
+        {["Model", "Context", "$/1M in"].map((h) => (
+          <div key={h} className={styles.tblCell}>{h}</div>
+        ))}
+      </div>
+      <div className={styles.tblBody}>
+        {rows.map((r) => (
+          <div key={r.model} className={styles.tblRow}>
+            <div className={styles.tblCell}>
+              <span className={styles.modelCell}>
+                <ModelIcon model={r.model} />
+                <span className={styles.tblCellText}>{r.model}</span>
+              </span>
+            </div>
+            <div className={styles.tblCell}>{r.context}</div>
+            <div className={styles.tblCell}>{r.price}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// styling
+
+.tbl { width: 100%; display: flex; flex-direction: column; border: 1px solid #e6e8ec; border-radius: 12px; overflow: hidden; background: #fafafa; font-size: 13px; }
+.tblHead { display: flex; color: #a1a1a1; font-weight: 500; }
+.tblHead .tblCell { padding-top: 7px; padding-bottom: 7px; }
+.tblBody { display: flex; flex-direction: column; background: #fff; border: 1px solid #e6e8ec; border-radius: 12px 12px 0 0; margin: 0 -1px -1px; }
+.tblRow { display: flex; }
+.tblRow:not(:last-child) { border-bottom: 1px solid #e6e8ec; }
+.tblCell { flex: 1 1 0; min-width: 0; padding: 9px 12px; display: flex; align-items: center; color: #1a1a1a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tblCell:not(:last-child) { border-right: 1px solid #e6e8ec; }
+/* text-overflow:ellipsis has no effect on a flex container's raw text, so the
+   label lives in this shrinkable child instead. */
+.tblCellText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modelCell { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.modelIcon { width: 14px; height: 14px; flex: none; border-radius: 2px; display: inline-flex; align-items: center; justify-content: center; color: #fff; box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.18); }
+@media (prefers-color-scheme: dark) {
+  .tbl { background: #242424; border-color: transparent; box-shadow: 0 0 0 0.5px rgba(255,255,255,0.12); }
+  .tblBody { background: #1a1a1a; border-color: #303030; }
+  .tblRow:not(:last-child) { border-bottom-color: #303030; }
+  .tblCell { color: #f5f5f5; }
+  .tblCell:not(:last-child) { border-right-color: #303030; }
+}
+
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
+import {
+  ArrowUp,
+  BookOpen,
+  Check,
+  ChevronRight,
+  Image as ImageIcon,
+  Loader2,
+  Paperclip,
+  Plus,
+  X,
+} from "lucide-react";
+import styles from "./PromptInput.module.css";
+
+const ENHANCED =
+  "This is an example prompt — rewritten to be clear and specific: state the goal, add the relevant context and constraints, define the expected output format and tone, and note any assumptions. Ask a clarifying question first if key details are missing.";
+
+/**
+ * Turn a raw prompt into an improved one. This is the integration seam:
+ * replace the mock body with a real request to your model/API. The component
+ * only depends on it resolving to the enhanced prompt string (and honouring
+ * the AbortSignal so an in-flight call can be cancelled).
+ */
+async function mockEnhance(prompt: string, signal?: AbortSignal): Promise<string> {
+  // --- MOCK (demo only) — remove when wiring a real backend ----------
+  await new Promise((r) => setTimeout(r, 2500));
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  return ENHANCED;
+  // --- REAL API (example) --------------------------------------------
+  // const res = await fetch("/api/enhance", {
+  //   method: "POST",
+  //   headers: { "Content-Type": "application/json" },
+  //   body: JSON.stringify({ prompt }),
+  //   signal,
+  // });
+  // if (!res.ok) throw new Error("Enhance request failed");
+  // return (await res.json()).prompt as string;
+}
+
+const MODELS = [
+  {
+    id: "claude-opus-4.8",
+    name: "Claude Opus 4.8",
+    desc: "Anthropic's most capable model — best for complex, multi-step reasoning.",
+    context: "200k context window",
+  },
+  {
+    id: "gpt-5.6",
+    name: "GPT-5.6",
+    desc: "OpenAI's flagship — strong all-round performance and tool use.",
+    context: "400k context window",
+  },
+  {
+    id: "gemini-2.5-pro",
+    name: "Gemini 2.5 Pro",
+    desc: "Google's long-context model — great for large documents and codebases.",
+    context: "1M context window",
+  },
+];
+
+const SKILLS = [
+  { id: "deep-research", name: "Deep Research" },
+  { id: "code-review", name: "Code Review" },
+  { id: "web-search", name: "Web Search" },
+  { id: "summarize", name: "Summarize" },
+];
+
+// Official brand marks (from Wikimedia Commons). ChatGPT is monochrome and
+// follows the text colour; Claude uses Anthropic's orange; Gemini keeps its
+// original radial gradient.
+function ModelIcon({ id }: { id: string }) {
+  if (id.startsWith("gpt")) {
+    return (
+      <svg width="12" height="12" viewBox="0 0 320 320" fill="currentColor" aria-hidden="true">
+        <path d="m297.06 130.97c7.26-21.79 4.76-45.66-6.85-65.48-17.46-30.4-52.56-46.04-86.84-38.68-15.25-17.18-37.16-26.95-60.13-26.81-35.04-.08-66.13 22.48-76.91 55.82-22.51 4.61-41.94 18.7-53.31 38.67-17.59 30.32-13.58 68.54 9.92 94.54-7.26 21.79-4.76 45.66 6.85 65.48 17.46 30.4 52.56 46.04 86.84 38.68 15.24 17.18 37.16 26.95 60.13 26.8 35.06.09 66.16-22.49 76.94-55.86 22.51-4.61 41.94-18.7 53.31-38.67 17.57-30.32 13.55-68.51-9.94-94.51zm-120.28 168.11c-14.03.02-27.62-4.89-38.39-13.88.49-.26 1.34-.73 1.89-1.07l63.72-36.8c3.26-1.85 5.26-5.32 5.24-9.07v-89.83l26.93 15.55c.29.14.48.42.52.74v74.39c-.04 33.08-26.83 59.9-59.91 59.97zm-128.84-55.03c-7.03-12.14-9.56-26.37-7.15-40.18.47.28 1.3.79 1.89 1.13l63.72 36.8c3.23 1.89 7.23 1.89 10.47 0l77.79-44.92v31.1c.02.32-.13.63-.38.83l-64.41 37.19c-28.69 16.52-65.33 6.7-81.92-21.95zm-16.77-139.09c7-12.16 18.05-21.46 31.21-26.29 0 .55-.03 1.52-.03 2.2v73.61c-.02 3.74 1.98 7.21 5.23 9.06l77.79 44.91-26.93 15.55c-.27.18-.61.21-.91.08l-64.42-37.22c-28.63-16.58-38.45-53.21-21.95-81.89zm221.26 51.49-77.79-44.92 26.93-15.54c.27-.18.61-.21.91-.08l64.42 37.19c28.68 16.57 38.51 53.26 21.94 81.94-7.01 12.14-18.05 21.44-31.2 26.28v-75.81c.03-3.74-1.96-7.2-5.2-9.06zm26.8-40.34c-.47-.29-1.3-.79-1.89-1.13l-63.72-36.8c-3.23-1.89-7.23-1.89-10.47 0l-77.79 44.92v-31.1c-.02-.32.13-.63.38-.83l64.41-37.16c28.69-16.55 65.37-6.7 81.91 22 6.99 12.12 9.52 26.31 7.15 40.1zm-168.51 55.43-26.94-15.55c-.29-.14-.48-.42-.52-.74v-74.39c.02-33.12 26.89-59.96 60.01-59.94 14.01 0 27.57 4.92 38.34 13.88-.49.26-1.33.73-1.89 1.07l-63.72 36.8c-3.26 1.85-5.26 5.31-5.24 9.06l-.04 89.79zm14.63-31.54 34.65-20.01 34.65 20v40.01l-34.65 20-34.65-20z" />
+      </svg>
+    );
+  }
+  if (id.startsWith("claude")) {
+    return (
+      <svg width="12" height="12" viewBox="0 0 100 100" fill="#d97757" aria-hidden="true">
+        <path d="m19.6 66.5 19.7-11 .3-1-.3-.5h-1l-3.3-.2-11.2-.3L14 53l-9.5-.5-2.4-.5L0 49l.2-1.5 2-1.3 2.9.2 6.3.5 9.5.6 6.9.4L38 49.1h1.6l.2-.7-.5-.4-.4-.4L29 41l-10.6-7-5.6-4.1-3-2-1.5-2-.6-4.2 2.7-3 3.7.3.9.2 3.7 2.9 8 6.1L37 36l1.5 1.2.6-.4.1-.3-.7-1.1L33 25l-6-10.4-2.7-4.3-.7-2.6c-.3-1-.4-2-.4-3l3-4.2L28 0l4.2.6L33.8 2l2.6 6 4.1 9.3L47 29.9l2 3.8 1 3.4.3 1h.7v-.5l.5-7.2 1-8.7 1-11.2.3-3.2 1.6-3.8 3-2L61 2.6l2 2.9-.3 1.8-1.1 7.7L59 27.1l-1.5 8.2h.9l1-1.1 4.1-5.4 6.9-8.6 3-3.5L77 13l2.3-1.8h4.3l3.1 4.7-1.4 4.9-4.4 5.6-3.7 4.7-5.3 7.1-3.2 5.7.3.4h.7l12-2.6 6.4-1.1 7.6-1.3 3.5 1.6.4 1.6-1.4 3.4-8.2 2-9.6 2-14.3 3.3-.2.1.2.3 6.4.6 2.8.2h6.8l12.6 1 3.3 2 1.9 2.7-.3 2-5.1 2.6-6.8-1.6-16-3.8-5.4-1.3h-.8v.4l4.6 4.5 8.3 7.5L89 80.1l.5 2.4-1.3 2-1.4-.2-9.2-7-3.6-3-8-6.8h-.5v.7l1.8 2.7 9.8 14.7.5 4.5-.7 1.4-2.6 1-2.7-.6-5.8-8-6-9-4.7-8.2-.5.4-2.9 30.2-1.3 1.5-3 1.2-2.5-2-1.4-3 1.4-6.2 1.6-8 1.3-6.4 1.2-7.9.7-2.6v-.2H49L43 72l-9 12.3-7.2 7.6-1.7.7-3-1.5.3-2.8L24 86l10-12.8 6-7.9 4-4.6-.1-.5h-.3L17.2 77.4l-4.7.6-2-2 .2-3 1-1 8-5.5Z" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M16 8.016A8.522 8.522 0 0 0 8.016 16h-.032A8.521 8.521 0 0 0 0 8.016v-.032A8.521 8.521 0 0 0 7.984 0h.032A8.522 8.522 0 0 0 16 7.984v.032z" fill="url(#pi-gemini-grad)" />
+      <defs>
+        <radialGradient
+          id="pi-gemini-grad"
+          cx="0"
+          cy="0"
+          r="1"
+          gradientUnits="userSpaceOnUse"
+          gradientTransform="matrix(16.1326 5.4553 -43.70045 129.2322 1.588 6.503)"
+        >
+          <stop offset=".067" stopColor="#9168C0" />
+          <stop offset=".343" stopColor="#5684D1" />
+          <stop offset=".672" stopColor="#1BA1E3" />
+        </radialGradient>
+      </defs>
+    </svg>
+  );
+}
+
+const skillName = (id: string) => SKILLS.find((sk) => sk.id === id)?.name ?? id;
+
+const escapeHtml = (str: string) =>
+  str.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] ?? c));
+
+type Phase = "idle" | "enhancing" | "enhanced";
+type Attachment = { id: number; name: string; kind: "image" | "file" };
+
+export function PromptInput({
+  onEnhance = mockEnhance,
+}: {
+  onEnhance?: (prompt: string, signal?: AbortSignal) => Promise<string>;
+} = {}) {
+  // `value` mirrors the editor's plain text (skill pills contribute their
+  // label), so it drives the empty/placeholder + enhance/send logic.
+  const [value, setValue] = useState("");
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [hoveredModel, setHoveredModel] = useState<string | null>(null);
+  const [model, setModel] = useState(MODELS[0].id);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // ids of chips currently playing their exit animation before removal
+  const [exitingAtt, setExitingAtt] = useState<number[]>([]);
+
+  // Keep the enhance pill mounted through a short exit so it leaves the same
+  // soft way it arrives (mirrors pi-pill-in / pi-pill-out).
+  const [pillMounted, setPillMounted] = useState(false);
+  const [pillExiting, setPillExiting] = useState(false);
+
+  // Slash-command palette (typing "/" opens the same skill picker).
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [slashQuery, setSlashQuery] = useState("");
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashKeyboard, setSlashKeyboard] = useState(false);
+
+  const editorRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
+  const plusRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const preEnhanceHTML = useRef("");
+  const pendingHTML = useRef<string | null>(null);
+  // height of the frame captured right before an enhance/revert swap, so the
+  // new height can be animated from it (FLIP) instead of jumping.
+  const flipFrom = useRef<number | null>(null);
+  const savedRange = useRef<Range | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const nextId = useRef(1);
+  const slashOpenRef = useRef(false);
+  const slashIndexRef = useRef(0);
+  const slashResultsRef = useRef<typeof SKILLS>([]);
+  const slashQueryRef = useRef("");
+  const slashTokenRef = useRef<{ node: Text; start: number; end: number } | null>(null);
+  const ignoreHoverRef = useRef(false);
+  const applySlashRef = useRef<(id: string) => void>(() => {});
+  const slashKeyLock = useRef(false);
+
+  const hasText = value.trim().length > 0;
+  const enhancing = phase === "enhancing";
+  const sendActive = hasText && !enhancing;
+  const showPill = hasText && !enhancing;
+  const slashResults = SKILLS.filter((sk) =>
+    sk.name.toLowerCase().includes(slashQuery.toLowerCase())
+  );
+  slashOpenRef.current = slashOpen;
+  slashIndexRef.current = slashIndex;
+  slashResultsRef.current = slashResults;
+
+  // Focus the editor and drop the caret at the very end of its content.
+  const focusEnd = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.focus();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    savedRange.current = range.cloneRange();
+  };
+
+  const syncFromEditor = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    setValue(editor.textContent ?? "");
+    // Mark pills that sit at the very start (nothing but whitespace before them)
+    // so CSS can drop their left margin — :first-child can't see text nodes.
+    editor.querySelectorAll<HTMLElement>("." + styles.skillPill).forEach((pill) => {
+      let atStart = true;
+      for (let n = pill.previousSibling; n; n = n.previousSibling) {
+        if (n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").trim() === "") continue;
+        atStart = false;
+        break;
+      }
+      pill.toggleAttribute("data-start", atStart);
+    });
+  };
+
+  // Remember the last caret position so the "+" menu can insert at it even
+  // after the editor loses focus.
+  const saveSelection = () => {
+    const editor = editorRef.current;
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount && editor && editor.contains(sel.anchorNode)) {
+      savedRange.current = sel.getRangeAt(0).cloneRange();
+    }
+  };
+
+  const closeSlash = () => {
+    setSlashOpen(false);
+    setSlashQuery("");
+    setSlashIndex(0);
+    setSlashKeyboard(false);
+    slashQueryRef.current = "";
+    slashTokenRef.current = null;
+    ignoreHoverRef.current = false;
+  };
+
+  // Build a skill pill node (contenteditable=false so it deletes as a unit).
+  const buildPill = (id: string) => {
+    const name = skillName(id);
+    const el = document.createElement("span");
+    el.className = styles.skillPill;
+    el.setAttribute("contenteditable", "false");
+    el.dataset.skill = id;
+    el.innerHTML =
+      '<span class="' + styles.skillPillLabel + '">/' + escapeHtml(name) + "</span>" +
+      '<button type="button" class="' + styles.skillPillX + '" data-remove="1" aria-label="Remove ' +
+      escapeHtml(name) + '"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>';
+    return el;
+  };
+
+  // Replace `range` with a pill + trailing space, then park the caret after it.
+  const insertPillOverRange = (range: Range, id: string) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    range.deleteContents();
+    const pill = buildPill(id);
+    range.insertNode(pill);
+    const space = document.createTextNode("\u00A0");
+    pill.after(space);
+    const after = document.createRange();
+    after.setStartAfter(space);
+    after.collapse(true);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(after);
+    editor.focus();
+    savedRange.current = after.cloneRange();
+    syncFromEditor();
+  };
+
+  // Insert from the "+" menu: use the current/last caret, else append at end.
+  const addSkillFromMenu = (id: string) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const sel = window.getSelection();
+    let range: Range | null = null;
+    if (sel && sel.rangeCount && editor.contains(sel.anchorNode)) {
+      range = sel.getRangeAt(0).cloneRange();
+    } else if (savedRange.current && editor.contains(savedRange.current.startContainer)) {
+      range = savedRange.current.cloneRange();
+    }
+    if (!range) {
+      range = document.createRange();
+      range.selectNodeContents(editor);
+      range.collapse(false);
+    }
+    insertPillOverRange(range, id);
+    setMenuOpen(false);
+  };
+
+  // Insert from a "/" command: swallow the typed "/query" then drop the pill.
+  const applySlash = (id: string) => {
+    const editor = editorRef.current;
+    if (!editor) {
+      closeSlash();
+      return;
+    }
+    let range: Range | null = null;
+    const token = slashTokenRef.current;
+    if (
+      token &&
+      token.node.isConnected &&
+      editor.contains(token.node) &&
+      token.end <= (token.node.textContent?.length ?? 0)
+    ) {
+      range = document.createRange();
+      range.setStart(token.node, token.start);
+      range.setEnd(token.node, token.end);
+    } else {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount) {
+        const caret = sel.getRangeAt(0);
+        range = caret.cloneRange();
+        const node = caret.startContainer;
+        if (node.nodeType === Node.TEXT_NODE && editor.contains(node)) {
+          const before = (node.textContent ?? "").slice(0, caret.startOffset);
+          const m = before.match(/\/([^\s/]*)$/);
+          if (m) {
+            range = document.createRange();
+            range.setStart(node, caret.startOffset - m[0].length);
+            range.setEnd(node, caret.startOffset);
+          }
+        }
+      }
+    }
+    if (!range) {
+      closeSlash();
+      return;
+    }
+    insertPillOverRange(range, id);
+    closeSlash();
+  };
+  applySlashRef.current = applySlash;
+
+  // Open the palette when the caret sits right after a "/" token.
+  const detectSlash = () => {
+    const editor = editorRef.current;
+    const sel = window.getSelection();
+    if (!editor || !sel || !sel.rangeCount || !sel.isCollapsed) return closeSlash();
+    const range = sel.getRangeAt(0);
+    const node = range.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE || !editor.contains(node)) return closeSlash();
+    const before = (node.textContent ?? "").slice(0, range.startOffset);
+    const m = before.match(/(?:^|\s)\/([^\s/]*)$/);
+    if (!m) return closeSlash();
+    const q = m[1];
+    const slashStart = before.length - m[1].length - 1;
+    slashTokenRef.current = {
+      node: node as Text,
+      start: slashStart,
+      end: range.startOffset,
+    };
+    if (q !== slashQueryRef.current) {
+      slashQueryRef.current = q;
+      setSlashIndex(0);
+    }
+    setSlashQuery(q);
+    setSlashOpen(true);
+  };
+
+  const onEditorInput = () => {
+    syncFromEditor();
+    if (phase === "enhanced") setPhase("idle");
+    detectSlash();
+  };
+
+  const moveSlash = (delta: number) => {
+    const results = slashResultsRef.current;
+    if (!results.length) return;
+    ignoreHoverRef.current = true;
+    setSlashKeyboard(true);
+    setSlashIndex((i) => (i + delta + results.length * 10) % results.length);
+  };
+
+  const handleSlashKey = (e: { key: string; preventDefault: () => void; stopPropagation?: () => void }) => {
+    const results = slashResultsRef.current;
+    if (!slashOpenRef.current || !results.length) return false;
+    if (
+      e.key !== "ArrowDown" &&
+      e.key !== "ArrowUp" &&
+      e.key !== "Enter" &&
+      e.key !== "Tab" &&
+      e.key !== "Escape"
+    ) {
+      return false;
+    }
+    e.preventDefault();
+    e.stopPropagation?.();
+    if (slashKeyLock.current) return true;
+    slashKeyLock.current = true;
+    queueMicrotask(() => {
+      slashKeyLock.current = false;
+    });
+    if (e.key === "ArrowDown") {
+      moveSlash(1);
+      return true;
+    }
+    if (e.key === "ArrowUp") {
+      moveSlash(-1);
+      return true;
+    }
+    if (e.key === "Enter" || e.key === "Tab") {
+      applySlashRef.current((results[slashIndexRef.current] ?? results[0]).id);
+      return true;
+    }
+    if (e.key === "Escape") {
+      closeSlash();
+      return true;
+    }
+    return false;
+  };
+
+  const onEditorKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (handleSlashKey(e)) return;
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  };
+
+  useEffect(() => {
+    if (!slashOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      handleSlashKey(e);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [slashOpen]);
+
+  useEffect(() => {
+    if (!slashOpen || !slashResults.length) return;
+    if (slashIndex >= slashResults.length) setSlashIndex(0);
+  }, [slashOpen, slashResults.length, slashIndex]);
+
+  const onEditorClick = (e: ReactMouseEvent<HTMLDivElement>) => {
+    const remove = (e.target as HTMLElement).closest("[data-remove]");
+    if (remove) {
+      e.preventDefault();
+      const pill = remove.closest<HTMLElement>("[data-skill]");
+      if (pill) {
+        // the separator space we inserted right after the pill — drop it too
+        // on removal so leftover spaces can't accumulate and shift the next
+        // pill out of alignment.
+        const sep = pill.nextSibling;
+        // collapse the pill's footprint (width + margins + padding) in sync with
+        // the fade so following text slides in smoothly instead of snapping.
+        const w = pill.getBoundingClientRect().width;
+        pill.style.maxWidth = `${w}px`;
+        pill.style.overflow = "hidden";
+        pill.style.whiteSpace = "nowrap";
+        void pill.offsetWidth;
+        pill.style.transition =
+          "max-width 180ms cubic-bezier(0.22,1,0.36,1), margin 180ms cubic-bezier(0.22,1,0.36,1), padding 180ms cubic-bezier(0.22,1,0.36,1)";
+        // leave the same soft way the enhance pill arrives, then drop the node
+        pill.setAttribute("data-exit", "");
+        pill.style.maxWidth = "0px";
+        pill.style.marginLeft = "0px";
+        pill.style.marginRight = "0px";
+        pill.style.paddingLeft = "0px";
+        pill.style.paddingRight = "0px";
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          if (sep && sep.nodeType === Node.TEXT_NODE && sep.textContent?.startsWith("\u00A0")) {
+            const rest = sep.textContent.slice(1);
+            if (rest) sep.textContent = rest;
+            else sep.parentNode?.removeChild(sep);
+          }
+          pill.remove();
+          syncFromEditor();
+          editorRef.current?.focus();
+        };
+        pill.addEventListener("animationend", finish, { once: true });
+        setTimeout(finish, 220);
+      }
+      return;
+    }
+    saveSelection();
+  };
+
+  // Dismiss the "+" menu on outside click / Escape.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (!plusRef.current?.contains(e.target as Node)) setMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
+
+  // Collapse the Skills flyout / model popover whenever the menu closes.
+  useEffect(() => {
+    if (!menuOpen) {
+      setSkillsOpen(false);
+      setHoveredModel(null);
+    }
+  }, [menuOpen]);
+
+  // After an enhance/revert the editor is shown editable again — write the
+  // pending HTML into it (enhanced text, or the restored original w/ pills).
+  useLayoutEffect(() => {
+    if (enhancing || pendingHTML.current === null) return;
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.innerHTML = pendingHTML.current;
+    pendingHTML.current = null;
+    syncFromEditor();
+    requestAnimationFrame(focusEnd);
+
+    // Animate the frame from its previous height to the new one so the input
+    // doesn't jump when the enhanced/original text changes its size.
+    const frame = frameRef.current;
+    const from = flipFrom.current;
+    flipFrom.current = null;
+    if (!frame || from === null) return;
+    const to = frame.offsetHeight;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduce || from === to) return;
+    frame.style.height = from + "px";
+    frame.style.overflow = "hidden";
+    void frame.offsetHeight; // force reflow so the start height is committed
+    frame.style.transition = "height 200ms cubic-bezier(0.22, 1, 0.36, 1)";
+    frame.style.height = to + "px";
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      frame.style.transition = "";
+      frame.style.height = "";
+      frame.style.overflow = "";
+      frame.removeEventListener("transitionend", finish);
+    };
+    frame.addEventListener("transitionend", finish);
+    setTimeout(finish, 260);
+  }, [phase, enhancing]);
+
+  // Drive the enhance pill's mount/exit. It enters when there's text; when it
+  // should leave it plays the exit animation first — except when handing over
+  // to the spinner (enhancing), where it swaps instantly.
+  useEffect(() => {
+    if (showPill) {
+      setPillMounted(true);
+      setPillExiting(false);
+      return;
+    }
+    if (!pillMounted) return;
+    if (enhancing) {
+      setPillMounted(false);
+      setPillExiting(false);
+      return;
+    }
+    setPillExiting(true);
+    const t = setTimeout(() => {
+      setPillMounted(false);
+      setPillExiting(false);
+    }, 200);
+    return () => clearTimeout(t);
+  }, [showPill, enhancing, pillMounted]);
+
+  // Cancel any in-flight enhance on unmount.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  const runEnhance = async () => {
+    if (!hasText || enhancing) return;
+    preEnhanceHTML.current = editorRef.current?.innerHTML ?? "";
+    setPhase("enhancing");
+    const ac = new AbortController();
+    abortRef.current = ac;
+    try {
+      const result = await onEnhance(value, ac.signal);
+      if (ac.signal.aborted) return;
+      pendingHTML.current = escapeHtml(result);
+      flipFrom.current = frameRef.current?.offsetHeight ?? null;
+      setPhase("enhanced");
+    } catch {
+      // Restore the untouched prompt if the call fails/aborts.
+      if (ac.signal.aborted) return;
+      pendingHTML.current = preEnhanceHTML.current;
+      setPhase("idle");
+    }
+  };
+
+  const revert = () => {
+    abortRef.current?.abort();
+    pendingHTML.current = preEnhanceHTML.current;
+    flipFrom.current = frameRef.current?.offsetHeight ?? null;
+    setPhase("idle");
+  };
+
+  const send = () => {
+    if (!sendActive) return;
+    const editor = editorRef.current;
+    if (editor) editor.innerHTML = "";
+    setValue("");
+    setPhase("idle");
+    setAttachments([]);
+    setExitingAtt([]);
+    closeSlash();
+    requestAnimationFrame(() => editorRef.current?.focus());
+  };
+
+  // Play the same soft fade/scale exit as the skill pills, then drop the chip.
+  const removeAttachment = (id: number) => {
+    setExitingAtt((e) => (e.includes(id) ? e : [...e, id]));
+    window.setTimeout(() => {
+      setAttachments((a) => a.filter((x) => x.id !== id));
+      setExitingAtt((e) => e.filter((x) => x !== id));
+    }, 200);
+  };
+
+  const openPicker = (kind: Attachment["kind"]) => {
+    const input = fileRef.current;
+    if (!input) return;
+    input.accept = kind === "image" ? "image/*" : "";
+    input.value = "";
+    input.dataset.kind = kind;
+    input.click();
+    setMenuOpen(false);
+  };
+
+  return (
+    <div className={styles.wrap}>
+      <input
+        ref={fileRef}
+        type="file"
+        multiple
+        hidden
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          if (!files.length) return;
+          const fallback = (e.target.dataset.kind as Attachment["kind"]) ?? "file";
+          setAttachments((a) => [
+            ...a,
+            ...files.map((f) => ({
+              id: nextId.current++,
+              name: f.name,
+              kind: f.type.startsWith("image/") ? ("image" as const) : fallback,
+            })),
+          ]);
+          e.target.value = "";
+          requestAnimationFrame(() => editorRef.current?.focus());
+        }}
+      />
+
+      <div ref={frameRef} className={styles.frame} data-enhancing={enhancing || undefined}>
+        {attachments.length > 0 && (
+          <div className={styles.chips}>
+            {attachments.map((att) => (
+              <span
+                key={att.id}
+                className={styles.chip}
+                data-exit={exitingAtt.includes(att.id) || undefined}
+              >
+                <span className={styles.chipIcon}>
+                  {att.kind === "image" ? <ImageIcon size={13} /> : <Paperclip size={13} />}
+                </span>
+                <span className={styles.chipName}>{att.name}</span>
+                <button
+                  type="button"
+                  className={styles.chipRemove}
+                  aria-label={"Remove " + att.name}
+                  onClick={() => removeAttachment(att.id)}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className={styles.editorWrap}>
+          {enhancing ? (
+            <div className={styles.enhancingText} aria-live="polite">
+              {value}
+            </div>
+          ) : (
+            <div
+              ref={editorRef}
+              className={styles.field}
+              contentEditable
+              suppressContentEditableWarning
+              role="textbox"
+              aria-multiline="true"
+              aria-label="Ask AI Agent"
+              data-empty={!hasText || undefined}
+              data-placeholder="Ask AI Agent"
+              onInput={onEditorInput}
+              onKeyDown={onEditorKeyDown}
+              onKeyUp={saveSelection}
+              onMouseUp={saveSelection}
+              onBlur={saveSelection}
+              onClick={onEditorClick}
+            />
+          )}
+
+          {slashOpen && !enhancing && (
+            <div
+              className={styles.slashMenu}
+              role="listbox"
+              aria-label="Skills"
+              data-keyboard={slashKeyboard || undefined}
+              onMouseMove={() => {
+                ignoreHoverRef.current = false;
+                if (slashKeyboard) setSlashKeyboard(false);
+              }}
+            >
+              <div className={styles.slashLabel}>Skills</div>
+              {slashResults.length ? (
+                slashResults.map((sk, i) => (
+                  <button
+                    key={sk.id}
+                    type="button"
+                    role="option"
+                    aria-selected={i === slashIndex}
+                    className={[styles.menuItem, i === slashIndex && styles.menuItemActive]
+                      .filter(Boolean)
+                      .join(" ")}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onMouseEnter={() => {
+                      if (ignoreHoverRef.current) return;
+                      setSlashIndex(i);
+                    }}
+                    onClick={() => applySlash(sk.id)}
+                  >
+                    <span className={styles.menuName}>{sk.name}</span>
+                  </button>
+                ))
+              ) : (
+                <div className={styles.slashEmpty}>No matching skills</div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className={styles.row}>
+          <div className={styles.plusWrap} ref={plusRef}>
+            <button
+              type="button"
+              className={[styles.iconBtn, styles.plus].join(" ")}
+              data-open={menuOpen || undefined}
+              aria-label="Add attachment or switch model"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((o) => !o)}
+            >
+              <span className={styles.plusIcon}>
+                <Plus size={14} />
+              </span>
+            </button>
+
+            {menuOpen && (
+              <div className={styles.menu} role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={styles.menuItem}
+                  onClick={() => openPicker("image")}
+                >
+                  <span className={styles.menuIcon}>
+                    <ImageIcon size={14} />
+                  </span>
+                  <span className={styles.menuName}>Add photos</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={styles.menuItem}
+                  onClick={() => openPicker("file")}
+                >
+                  <span className={styles.menuIcon}>
+                    <Paperclip size={14} />
+                  </span>
+                  <span className={styles.menuName}>Attach files</span>
+                </button>
+                <div className={styles.menuDivider} />
+                <div
+                  className={styles.menuSub}
+                  onMouseEnter={() => setSkillsOpen(true)}
+                  onMouseLeave={() => setSkillsOpen(false)}
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className={styles.menuItem}
+                    aria-haspopup="menu"
+                    aria-expanded={skillsOpen}
+                    onClick={() => setSkillsOpen(true)}
+                  >
+                    <span className={styles.menuIcon}>
+                      <BookOpen size={14} />
+                    </span>
+                    <span className={styles.menuName}>Skills</span>
+                    <span className={styles.menuChevron}>
+                      <ChevronRight size={14} />
+                    </span>
+                  </button>
+                  {skillsOpen && (
+                    <div className={styles.menuFlyout} role="menu">
+                      {SKILLS.map((sk) => (
+                        <button
+                          key={sk.id}
+                          type="button"
+                          role="menuitem"
+                          className={styles.menuItem}
+                          onClick={() => addSkillFromMenu(sk.id)}
+                        >
+                          <span className={styles.menuName}>{sk.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className={styles.menuDivider} />
+                <div className={styles.menuLabel}>Model</div>
+                {MODELS.map((m) => (
+                  <div
+                    key={m.id}
+                    className={styles.menuSub}
+                    onMouseEnter={() => setHoveredModel(m.id)}
+                    onMouseLeave={() => setHoveredModel(null)}
+                  >
+                    <button
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={model === m.id}
+                      className={styles.menuItem}
+                      onClick={() => {
+                        setModel(m.id);
+                        setMenuOpen(false);
+                      }}
+                    >
+                      <span className={styles.menuBrand}>
+                        <ModelIcon id={m.id} />
+                      </span>
+                      <span className={styles.menuName}>{m.name}</span>
+                      {model === m.id && (
+                        <span className={styles.menuCheck}>
+                          <Check size={14} />
+                        </span>
+                      )}
+                    </button>
+                    {hoveredModel === m.id && (
+                      <div className={styles.menuPopover} role="tooltip">
+                        <div className={styles.popoverTitle}>{m.name}</div>
+                        <p className={styles.popoverDesc}>{m.desc}</p>
+                        <div className={styles.popoverMeta}>{m.context}</div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className={styles.right}>
+            {enhancing ? (
+              <span
+                className={[styles.iconBtn, styles.spinnerBtn].join(" ")}
+                aria-label="Enhancing prompt"
+              >
+                <Loader2 size={14} className={styles.spinner} />
+              </span>
+            ) : (
+              pillMounted && (
+                <button
+                  type="button"
+                  className={[styles.pill, pillExiting && styles.pillExit]
+                    .filter(Boolean)
+                    .join(" ")}
+                  onClick={phase === "enhanced" ? revert : runEnhance}
+                >
+                  {phase === "enhanced" ? "Revert" : "Enhance Prompt"}
+                </button>
+              )
+            )}
+            <button
+              type="button"
+              className={[styles.iconBtn, styles.send, sendActive && styles.sendActive]
+                .filter(Boolean)
+                .join(" ")}
+              aria-label="Send"
+              disabled={!sendActive}
+              onClick={send}
+            >
+              <ArrowUp size={14} />
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+.wrap {
+  width: 100%;
+  max-width: 420px;
+  font-family: "Inter Variable", "Inter", sans-serif;
+}
+
+.frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 10px 10px;
+  background: #ffffff;
+  /* transparent border keeps the box geometry the enhancing ::after relies on;
+     the visible 0.5px hairline + drop shadow match the surrounding cards. */
+  border: 0.5px solid transparent;
+  border-radius: 12px;
+  /* hairline ring first so it paints on top of the drops and stays even on
+     every edge (otherwise the bottom is hidden by the drop shadow) */
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.05),
+    0 2px 4px rgba(0, 0, 0, 0.02);
+}
+/* with chips present, match the 10px side padding on top */
+.frame:has(.chips) {
+  padding-top: 10px;
+}
+
+/* enhancing: a conic-gradient ring sweeps around the border */
+@property --pi-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.frame[data-enhancing] {
+  border-color: transparent;
+}
+.frame[data-enhancing]::after {
+  content: "";
+  position: absolute;
+  inset: -0.5px;
+  border-radius: 12.5px;
+  /* border + padding-box mask keeps the ring an even 0.75px on every side —
+     the older content-box/padding trick rendered the bottom edge thinner */
+  border: 0.75px solid transparent;
+  background: conic-gradient(
+      from var(--pi-angle),
+      #2b7fff, #8b5cf6, #d946ef, #22d3ee, #2b7fff
+    )
+    border-box;
+  -webkit-mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: pi-border-spin 1.1s linear infinite,
+    pi-border-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  pointer-events: none;
+}
+@keyframes pi-border-spin {
+  to { --pi-angle: 360deg; }
+}
+@keyframes pi-border-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* editable field — a contentEditable div so skill pills can flow inline */
+.editorWrap {
+  position: relative;
+}
+.field {
+  position: relative;
+  width: 100%;
+  margin: 0;
+  outline: 0;
+  background: transparent;
+  color: #1a1a1a;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  letter-spacing: -0.12px;
+  min-height: 18px;
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.field ::selection,
+.field::selection {
+  background: Highlight;
+  color: HighlightText;
+}
+.field ::-moz-selection,
+.field::-moz-selection {
+  background: Highlight;
+  color: HighlightText;
+}
+.field[data-empty]::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  top: 0;
+  left: 0;
+  color: #1a1a1a;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* inline skill pill — Enhance-Prompt dimensions + a blue tint and an × */
+.skillPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  /* shorter than the field's 18px line-height so the pill never expands the
+     line box (middle + 18px height grew the field and jumped the action gap) */
+  height: 16px;
+  padding: 0 0 0 5px;
+  margin: 0 2px;
+  border-radius: 999px;
+  background: rgba(43, 127, 255, 0.12);
+  color: #1f6feb;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.12px;
+  white-space: nowrap;
+  position: relative;
+  top: -1px;
+  vertical-align: baseline;
+  user-select: none;
+}
+/* at the very start of the field: drop the left margin, keep only the right
+   (data-start is set in JS since :first-child ignores leading text nodes) */
+.skillPill[data-start] {
+  margin-left: 0;
+}
+.skillPillLabel {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.skillPillX {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.65;
+  cursor: pointer;
+  transition: opacity 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    background 150ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.skillPillX:hover {
+  opacity: 1;
+  background: rgba(43, 127, 255, 0.16);
+}
+/* leave the same soft way the enhance pill arrives */
+.skillPill[data-exit] {
+  animation: pi-pill-out 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  pointer-events: none;
+}
+
+/* "/" command palette — same container as the + menu, pinned above the field */
+.slashMenu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 25;
+  width: 200px;
+  padding: 3px;
+  background: #ffffff;
+  border: 0.5px solid #e6e8ec;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02), 0 1px 1px rgba(0, 0, 0, 0.04);
+  transform-origin: bottom left;
+  animation: pi-menu-in 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.slashLabel {
+  padding: 3px 7px;
+  font-size: 11px;
+  font-weight: 425;
+  color: #a1a1a1;
+}
+.slashEmpty {
+  padding: 6px 7px;
+  font-size: 11px;
+  color: #a1a1a1;
+}
+
+/* enhancing: the current text shimmers while the model rewrites it */
+.enhancingText {
+  font-size: 12px;
+  line-height: 18px;
+  letter-spacing: -0.12px;
+  word-break: break-word;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background: linear-gradient(
+    90deg,
+    #1a1a1a 0%, #1a1a1a 30%,
+    rgba(26, 26, 26, 0.45) 45%, rgba(26, 26, 26, 0.45) 55%,
+    #1a1a1a 70%, #1a1a1a 100%
+  );
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: pi-shine 2.25s cubic-bezier(0.25, 0.1, 0.25, 1) infinite;
+}
+@keyframes pi-shine {
+  0%, 18% { background-position: 100% 0; }
+  82%, 100% { background-position: 0% 0; }
+}
+
+/* attachment chips — same white surface + hairline outline as the frame */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  /* tighten only the chips->text gap (frame gap is 12px) without touching the
+     text->button-row gap */
+  margin-bottom: -6px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 4px 3px 5px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 0.5px solid #e6e8ec;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+  color: #1a1a1a;
+  font-size: 11px;
+  line-height: 14px;
+  animation: pi-chip-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+/* leave the same soft fade/scale way the skill pills do */
+.chip[data-exit] {
+  animation: pi-pill-out 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  pointer-events: none;
+}
+.chipIcon {
+  display: inline-flex;
+  flex: none;
+  color: #a1a1a1;
+}
+.chipName {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chipRemove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* pull 2px closer to the filename without changing the icon->text gap */
+  margin-left: -2px;
+  width: 15px;
+  height: 15px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #a1a1a1;
+  cursor: pointer;
+  transition: background 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 150ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.chipRemove:hover {
+  background: rgba(26, 26, 26, 0.08);
+  color: #1a1a1a;
+}
+@keyframes pi-chip-in {
+  from { opacity: 0; transform: translateY(4px); filter: blur(2px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.plusWrap {
+  position: relative;
+  display: flex;
+}
+.right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* round soft button.
+   The fill lives on ::before so a press scales only the container (0.98),
+   never the icon on top. */
+.iconBtn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: #1a1a1a;
+  cursor: pointer;
+}
+.iconBtn::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: rgba(26, 26, 26, 0.06);
+  transition: background 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 150ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.iconBtn:hover::before {
+  background: rgba(26, 26, 26, 0.1);
+}
+.iconBtn:active::before {
+  transform: scale(0.98);
+}
+/* keep the icon above the (opaque, when active) ::before fill */
+.iconBtn > svg {
+  position: relative;
+}
+
+.plusIcon {
+  position: relative;
+  display: inline-flex;
+  transition: transform 200ms cubic-bezier(0.35, 1.55, 0.65, 1);
+}
+.plus[data-open]::before {
+  background: rgba(26, 26, 26, 0.12);
+}
+.plus[data-open] .plusIcon {
+  transform: rotate(45deg);
+}
+
+/* enhance / revert pill — same fill + press behaviour as the icon buttons */
+.pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: #1a1a1a;
+  font-size: 11px;
+  line-height: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  animation: pi-pill-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.pill::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: rgba(26, 26, 26, 0.06);
+  transition: background 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 150ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.pill:hover::before {
+  background: rgba(26, 26, 26, 0.1);
+}
+.pill:active::before {
+  transform: scale(0.98);
+}
+@keyframes pi-pill-in {
+  from { opacity: 0; transform: scale(0.96); filter: blur(2px); }
+  to { opacity: 1; transform: scale(1); filter: blur(0); }
+}
+/* symmetric exit — mirrors pi-pill-in so the enhance pill (and the inline
+   skill pills) leave the same soft way they arrive */
+@keyframes pi-pill-out {
+  from { opacity: 1; transform: scale(1); filter: blur(0); }
+  to { opacity: 0; transform: scale(0.96); filter: blur(2px); }
+}
+.pill.pillExit {
+  animation: pi-pill-out 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  pointer-events: none;
+}
+
+.send {
+  color: #a1a1a1;
+}
+.send:disabled {
+  cursor: default;
+}
+.send:disabled:active::before {
+  transform: none;
+}
+.sendActive {
+  color: #ffffff;
+}
+.sendActive::before {
+  background: #0b0d12;
+}
+.sendActive:hover::before {
+  background: #2a2f3a;
+}
+
+.spinnerBtn {
+  cursor: default;
+}
+.spinner {
+  position: relative;
+  color: #a1a1a1;
+  animation: pi-spin 0.7s linear infinite;
+}
+@keyframes pi-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* "+" menu — same container style as the input frame */
+.menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  width: 180px;
+  padding: 3px;
+  background: #ffffff;
+  border: 0.5px solid #e6e8ec;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02), 0 1px 1px rgba(0, 0, 0, 0.04);
+  transform-origin: bottom left;
+  animation: pi-menu-in 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.menuItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 26px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #1a1a1a;
+  font-size: 11px;
+  font-weight: 425;
+  line-height: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.menuItem:hover {
+  background: rgba(26, 26, 26, 0.06);
+}
+.menuItem:active {
+  background: rgba(26, 26, 26, 0.09);
+}
+.menuItem.menuItemActive {
+  background: rgba(26, 26, 26, 0.06);
+}
+.slashMenu[data-keyboard] .menuItem:hover {
+  background: transparent;
+}
+.slashMenu[data-keyboard] .menuItem.menuItemActive,
+.slashMenu[data-keyboard] .menuItem.menuItemActive:hover {
+  background: rgba(26, 26, 26, 0.06);
+}
+.wrap svg {
+  stroke-width: 1.5px;
+}
+.menuIcon {
+  display: inline-flex;
+  flex: none;
+  color: #a1a1a1;
+}
+.menuName {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menuCheck {
+  display: inline-flex;
+  flex: none;
+  color: #1a1a1a;
+}
+
+/* Skills — a side flyout that expands from the "Skills" row */
+.menuSub {
+  position: relative;
+}
+.menuChevron {
+  display: inline-flex;
+  flex: none;
+  color: #a1a1a1;
+}
+/* brand marks keep their own colours; ChatGPT is monochrome so it follows text */
+.menuBrand {
+  display: inline-flex;
+  flex: none;
+  color: #1a1a1a;
+}
+.menuFlyout {
+  position: absolute;
+  top: -3px;
+  left: calc(100% + 6px);
+  width: 168px;
+  padding: 3px;
+  background: #ffffff;
+  border: 0.5px solid #e6e8ec;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02), 0 1px 1px rgba(0, 0, 0, 0.04);
+}
+/* invisible bridge across the 6px gap so the hover doesn't drop when the
+   pointer travels from the row into the flyout */
+.menuFlyout::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -7px;
+  width: 7px;
+}
+
+/* model info popover — a non-interactive card shown on hover to the right */
+.menuPopover {
+  position: absolute;
+  top: -3px;
+  left: calc(100% + 6px);
+  z-index: 30;
+  width: 200px;
+  padding: 10px 12px;
+  background: #ffffff;
+  border: 0.5px solid #e6e8ec;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02), 0 1px 1px rgba(0, 0, 0, 0.04);
+  pointer-events: none;
+}
+.popoverTitle {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  color: #1a1a1a;
+}
+.popoverDesc {
+  margin: 2px 0 0;
+  font-size: 11px;
+  line-height: 15px;
+  color: #a1a1a1;
+}
+.popoverMeta {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 14px;
+  color: #a1a1a1;
+}
+.menuDivider {
+  height: 0.5px;
+  margin: 4px -3px;
+  background: #e6e8ec;
+}
+.menuLabel {
+  padding: 3px 7px;
+  font-size: 11px;
+  font-weight: 425;
+  color: #a1a1a1;
+}
+@keyframes pi-menu-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); filter: blur(2px); }
+  to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+
+@media (prefers-color-scheme: dark) {
+  .frame {
+    background: #1a1a1a;
+    box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.12),
+      0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.3);
+  }
+  .frame[data-enhancing]::after {
+    background: conic-gradient(
+        from var(--pi-angle),
+        #3b6fb5, #6b5aa6, #9a4f96, #3a8a9a, #3b6fb5
+      )
+      border-box;
+  }
+  .field { color: #f5f5f5; }
+  .field::placeholder { color: #f5f5f5; }
+  .enhancingText {
+    background: linear-gradient(
+      90deg,
+      #f5f5f5 0%, #f5f5f5 30%,
+      rgba(245, 245, 245, 0.45) 45%, rgba(245, 245, 245, 0.45) 55%,
+      #f5f5f5 70%, #f5f5f5 100%
+    );
+    background-size: 300% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+  }
+  .chip { background: #1a1a1a; border-color: #303030; color: #f5f5f5; }
+  .chipIcon { color: #a3a3a3; }
+  .chipRemove { color: #a3a3a3; }
+  .chipRemove:hover { background: rgba(245, 245, 245, 0.08); color: #f5f5f5; }
+  .iconBtn { color: #f5f5f5; }
+  .iconBtn::before { background: rgba(245, 245, 245, 0.06); }
+  .iconBtn:hover::before { background: rgba(245, 245, 245, 0.1); }
+  .plus[data-open]::before { background: rgba(245, 245, 245, 0.12); }
+  .pill { color: #f5f5f5; }
+  .pill::before { background: rgba(245, 245, 245, 0.06); }
+  .pill:hover::before { background: rgba(245, 245, 245, 0.1); }
+  .sendActive { color: #0a0a0a; }
+  .sendActive::before { background: #f5f5f5; }
+  .sendActive:hover::before { background: #ffffff; }
+  .spinner { color: #a3a3a3; }
+  .menu { background: #1a1a1a; border-color: #303030; }
+  .menuItem { color: #f5f5f5; }
+  .menuItem:hover { background: rgba(245, 245, 245, 0.06); }
+  .menuItem:active { background: rgba(245, 245, 245, 0.09); }
+  .menuIcon { color: #a3a3a3; }
+  .menuCheck { color: #f5f5f5; }
+  .menuChevron { color: #a3a3a3; }
+  .menuBrand { color: #f5f5f5; }
+  .menuDivider { background: #303030; }
+  .menuLabel { color: #a3a3a3; }
+  .menuFlyout { background: #1a1a1a; border-color: #303030; }
+  .menuPopover { background: #1a1a1a; border-color: #303030; }
+  .popoverTitle { color: #f5f5f5; }
+  .popoverDesc, .popoverMeta { color: #a3a3a3; }
+  .skillPill { background: rgba(43, 127, 255, 0.22); color: #9ec5ff; }
+  .slashMenu { background: #1a1a1a; border-color: #303030; }
+  .slashLabel, .slashEmpty { color: #a3a3a3; }
+  .menuItem.menuItemActive { background: rgba(245, 245, 245, 0.06); }
+  .slashMenu[data-keyboard] .menuItem.menuItemActive,
+  .slashMenu[data-keyboard] .menuItem.menuItemActive:hover {
+    background: rgba(245, 245, 245, 0.06);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .iconBtn::before, .pill::before, .menuItem, .chipRemove, .plusIcon { transition: none; }
+  .chip, .chip[data-exit], .pill, .pill.pillExit, .skillPill[data-exit], .menu, .menuFlyout, .menuPopover, .slashMenu { animation: none; }
+  .enhancingText, .frame[data-enhancing]::after { animation: none; }
+  .spinner { animation-duration: 1.4s; }
+}
