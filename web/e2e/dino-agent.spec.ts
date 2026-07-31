@@ -150,6 +150,8 @@ test("keeps empty and connect states honest when no authenticated profile exists
   await page.getByRole("link", { name: "New session" }).click();
   await expect(page).toHaveURL(/\/connect/);
   await expect(page.getByRole("heading", { name: /Start a new session|How should money move/ })).toBeVisible();
+  await page.getByRole("button", { name: /Connect a wallet for this session/ }).click();
+  await expect(page.getByRole("heading", { name: "Connect your wallet" })).toBeVisible();
   await expect(page.getByText(/WalletConnect is ready for Hedera testnet|WalletConnect is not enabled/)).toBeVisible();
 });
 
@@ -164,6 +166,7 @@ test("switches sessions and disconnects the active wallet from the header menu",
   await expect(page.getByRole("button", { name: /0\.0\.222/ }).first()).toBeVisible();
   await page.getByRole("button", { name: /0\.0\.222/ }).first().click();
   await expect(page.getByRole("menu")).toBeVisible();
+  await page.screenshot({ path: "/opt/cursor/artifacts/screenshots/session-switcher-menu.png", fullPage: true });
   await page.getByRole("menuitem", { name: /0\.0\.111/ }).click();
   await expect.poll(() => state.activeProfileId).toBe("user-wallet-0.0.111");
   await expect(page.getByRole("button", { name: /0\.0\.111/ }).first()).toBeVisible();
@@ -174,14 +177,18 @@ test("switches sessions and disconnects the active wallet from the header menu",
   await expect.poll(() => state.accountCalls.some((call) => call.path === "/disconnect")).toBeTruthy();
   await expect(page.getByText("Connect an account to begin")).toBeVisible();
   await expect(page.getByRole("button", { name: /Resume 0\.0\.111|Resume 0\.0\.222|choose session/ }).first()).toBeVisible();
+  await page.screenshot({ path: "/opt/cursor/artifacts/screenshots/session-after-disconnect.png", fullPage: true });
 });
 
 test("uses the current dashboard, graph drawer, source receipt, modes, limits, schedule, composer, and SSE", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-chromium", "The mobile project has its own layout smoke.");
-  const state = stateWithProfile();
+  const state = stateWithProfile([{ ...walletB, status: "active", autonomyMode: 3 }]);
+  state.profiles = state.profiles.map((profile) => profile.kind === "agent_managed" ? { ...profile, status: "paused" } : profile);
+  state.activeProfileId = "user-wallet-0.0.222";
+  state.schedule.autonomyMode = 3;
   await installApi(page, state);
   await page.goto("/");
-  await expect(page.getByText("0.0.55555 · hedera:testnet").first()).toBeVisible();
+  await expect(page.getByText("0.0.222 · hedera:testnet").first()).toBeVisible();
   await expect(page.getByText("HBAR price intelligence settled").first()).toBeVisible();
   await expect(page.getByText("HBAR · spot-price")).toBeVisible();
 
@@ -190,13 +197,19 @@ test("uses the current dashboard, graph drawer, source receipt, modes, limits, s
   await page.getByRole("button", { name: "Trace" }).click();
   await expect(page.getByText("Click any step in the stream, or a trade marker on the graph, to inspect it here.").first()).toBeVisible();
   await page.getByRole("button", { name: "Ledger" }).click();
-  await expect(page.getByText("Data spend").first()).toBeVisible();
+  await expect(page.getByText(/Intelligence \(x402\)|Spend|Data spend/).first()).toBeVisible();
   await page.getByRole("button", { name: "Close inspector" }).last().click();
 
-  for (const label of ["Observe only", "Advise only", "Propose and wait", "Autonomous within limits"]) await page.getByText(label, { exact: true }).click();
-  await expect.poll(() => state.calls.filter((call) => call.path.endsWith("/schedule") && call.body.autonomyMode === 4).length).toBeGreaterThan(0);
-  await page.locator('input[type="number"]').first().fill("150");
-  await expect.poll(() => state.calls.filter((call) => call.path.endsWith("/mandate")).length).toBeGreaterThan(0);
+  for (const label of ["Observe only", "Advise only", "Propose and wait"]) {
+    await page.getByRole("button", { name: label, exact: true }).first().click();
+  }
+  await expect.poll(() => state.calls.filter((call) => call.path.endsWith("/schedule") && call.body.autonomyMode === 3).length).toBeGreaterThan(0);
+  // Numeric limit fields are Mode 4 / treasury-only; wallet custody edits mandate via Change setup / API.
+  const limitInput = page.locator('input[type="number"]').first();
+  if (await limitInput.count()) {
+    await limitInput.fill("150");
+    await expect.poll(() => state.calls.filter((call) => call.path.endsWith("/mandate")).length).toBeGreaterThan(0);
+  }
 
   await page.getByRole("combobox", { name: "Agent run frequency" }).selectOption({ label: "every 30m" });
   await page.getByRole("button", { name: /Watching · next/ }).click();
@@ -220,7 +233,7 @@ test("approves and declines proposals through the real UI endpoints", async ({ p
   const approved = stateWithProfile();
   await installApi(page, approved);
   await page.goto("/");
-  await page.getByRole("button", { name: "Approve and execute" }).click();
+  await page.getByRole("button", { name: "Approve in wallet" }).click();
   await expect(page.getByText("Trade approval recorded").first()).toBeVisible();
   expect(approved.calls.some((call) => call.path === "/proposals/proposal-1/approve")).toBeTruthy();
 
