@@ -1,7 +1,7 @@
 # Demo runbook
 
-This is the shortest reliable path for an under-five-minute bounty demo. Use a
-fresh terminal and rehearse it once before recording.
+Technical rehearsal for an under-five-minute recording.
+For the **spoken script**, use **[DEMO_SCRIPT.md](DEMO_SCRIPT.md)**.
 
 ## Before recording
 
@@ -26,7 +26,7 @@ fresh terminal and rehearse it once before recording.
    curl -fsS https://api.testnet.blocky402.com/supported
    ```
 
-7. Run `npm test`, `npm run typecheck`, and `npm run web:build`.
+7. Run `npm test` and `npm run web:build`.
 
 ## Recording flow
 
@@ -42,32 +42,17 @@ Start the web experience in terminal two:
 npm run web:dev
 ```
 
-In terminal three, run the paid agent flow:
+Open http://localhost:4321/connect → choose **autonomous** (Mode 4) or approval mode →
+workspace → follow **[DEMO_SCRIPT.md](DEMO_SCRIPT.md)**.
+
+Optional protocol-only proof in terminal three:
 
 ```bash
 npm run e2e
 ```
 
 The command must show all six stages, a successful settlement transaction, a
-HashScan link, and `MIRROR_VERIFIED result=SUCCESS`. Treat any missing stage as
-a failed rehearsal, even if the data response looks correct.
-
-## Suggested narration
-
-1. **Problem (20s):** Agents should buy one market-data query instead of holding
-   a subscription and API key.
-2. **Catalog (25s):** Show the three products and their tiny HBAR prices.
-3. **Protocol (60s):** Run the command and point out the unpaid request, HTTP
-   402 terms, local policy approval, signature, Hedera settlement, and HTTP 200 data.
-4. **Proof (45s):** Open the generated HashScan link. Show `SUCCESS`, payer debit,
-   receiver credit, amount, and timestamp. The transaction ID belongs to the
-   facilitator fee payer; the transfer list proves the buyer and seller legs.
-5. **Agent safety (35s):** Show the configured origin, payee, asset, network, and
-   maximum amount. The signing tool refuses any challenge outside that scope.
-6. **Architecture (45s):** Show the swappable `DataProvider`, x402 middleware,
-   Blocky402 facilitator, and Hedera rail.
-7. **Close (15s):** Every query has an explicit price, machine-readable result,
-   and independently verifiable on-chain receipt.
+HashScan link, and `MIRROR_VERIFIED result=SUCCESS`.
 
 ## Recovery notes
 
@@ -76,5 +61,5 @@ a failed rehearsal, even if the data response looks correct.
 - Policy rejection: compare `SERVER_URL`, `PAY_TO_ACCOUNT`, the asset, and amount cap.
 - Mirror lookup lag: settlement is final first; the script polls indexing for about 15 seconds.
 - Expired payload: sign immediately before retry; the server uses a 180-second timeout.
-- Never switch to a browser-embedded private key to save a demo. Keep the paid
-  flow in the local agent process.
+- No trade this cycle: still show paid unlocks + HashScan; bands may already be healthy.
+- Never switch to a browser-embedded private key to save a demo.

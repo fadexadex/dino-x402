@@ -1,0 +1,31 @@
+flowchart TB
+  subgraph People["You / judges"]
+    UI["Dino Agent workbench<br/>browser UI"]
+  end
+
+  subgraph App["This application"]
+    API["API server<br/>port 4021"]
+    AGENT["Portfolio agent<br/>check-in runner"]
+    STORE["Local SQLite store<br/>runs · payments · events"]
+    DATA["Market-data shop<br/>/data/quote · /data/spot-price"]
+  end
+
+  subgraph Outside["Outside services"]
+    CG["CoinGecko<br/>live prices"]
+    FAC["Blocky402<br/>payment helper"]
+    HED["Hedera testnet<br/>payments + swaps"]
+    DEX["SaucerSwap<br/>token exchange"]
+    MIR["Mirror Node<br/>balance lookup"]
+  end
+
+  UI <-->|"live updates"| API
+  API --> AGENT
+  AGENT --> STORE
+  AGENT -->|"1. read balances"| MIR
+  AGENT -->|"2. buy prices via x402"| DATA
+  DATA -->|"3. fetch after payment"| CG
+  DATA -->|"payment settle"| FAC
+  FAC --> HED
+  AGENT -->|"4. maybe rebalance"| DEX
+  DEX --> HED
+  AGENT -->|"5. confirm result"| MIR

@@ -1,0 +1,24 @@
+flowchart TB
+  START(["Open /connect"]) --> PATH{"How should money move?"}
+  PATH -->|"I approve each trade"| WALLET["Connect Hedera wallet"]
+  PATH -->|"Agent runs alone"| FUND["Fund agent treasury"]
+  WALLET --> LEVEL{"How hands-on?"}
+  LEVEL --> M1["1 · Watch only"]
+  LEVEL --> M2["2 · Advise me"]
+  LEVEL --> M3["3 · Propose, I approve"]
+  FUND --> M4["4 · Autonomous mode"]
+  M1 --> WS["Open the workspace"]
+  M2 --> WS
+  M3 --> WS
+  M4 --> WS
+  WS --> RUN["Send a portfolio check-in"]
+  RUN --> PAY["Pay for live market data"]
+  PAY --> THINK["Agent shares plain-language thoughts"]
+  THINK --> DECIDE{"Does the mix need a rebalance?"}
+  DECIDE -->|"Mode 3"| APPROVE["You approve in your wallet"]
+  DECIDE -->|"Mode 4"| AUTO["Agent submits the swap"]
+  DECIDE -->|"No"| HOLD["Conclusion: hold"]
+  APPROVE --> REFRESH["Portfolio balances refresh"]
+  AUTO --> REFRESH
+  REFRESH --> DONE["Conclusion + on-chain receipts"]
+  HOLD --> DONE

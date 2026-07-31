@@ -1,0 +1,31 @@
+sequenceDiagram
+  participant U as You
+  participant A as Portfolio agent
+  participant S as Market-data shop
+  participant F as Blocky402
+  participant H as Hedera testnet
+  participant C as CoinGecko
+  participant D as SaucerSwap
+
+  U->>A: Start a check-in
+  A->>A: Read live wallet balances
+  A->>S: Ask for HBAR price
+  S-->>A: Payment required (HTTP 402)
+  A->>F: Pay tiny HBAR amount
+  F->>H: Settle payment on-chain
+  H-->>A: Payment confirmed
+  A->>S: Retry with proof of payment
+  S->>C: Fetch live price
+  C-->>S: Price + 24h change
+  S-->>A: Unlock market data
+  Note over A: Repeat for USDC and SAUCE
+  A->>A: Compare mix to target bands
+  alt Mix needs a rebalance
+    A->>D: Get live exchange quote
+    A->>D: Submit swap (auto or after your approval)
+    D->>H: Swap settles on Hedera
+    A->>A: Refresh portfolio balances
+  else Mix looks healthy
+    A-->>U: No trade needed
+  end
+  A-->>U: Conclusion + HashScan receipts
