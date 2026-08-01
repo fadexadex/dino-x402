@@ -283,6 +283,7 @@ export const createApp = (
       if (process.env.FRONTEND_URL) return process.env.FRONTEND_URL;
       return origin; // Allow any origin if FRONTEND_URL is not strictly set, useful for Vercel preview deployments.
     },
+    credentials: true,
     allowHeaders: ["Content-Type", "Last-Event-ID", "Idempotency-Key"],
     allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   }));
