@@ -29,7 +29,8 @@ export function useAgentDashboard() {
   useEffect(() => {
     const profileId = state.data?.profile?.id;
     if (!profileId) return;
-    const stream = new EventSource(`/api/v1/profiles/${encodeURIComponent(profileId)}/stream`, { withCredentials: true });
+    const BASE_URL = import.meta.env?.PUBLIC_API_URL || "";
+    const stream = new EventSource(`${BASE_URL}/api/v1/profiles/${encodeURIComponent(profileId)}/stream`, { withCredentials: true });
     stream.onmessage = (message) => {
       try {
         const event = JSON.parse(message.data) as RunEvent;
