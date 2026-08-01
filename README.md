@@ -89,6 +89,22 @@ npm run e2e        # one real paid call + HashScan proof
 
 ---
 
+## Deployment (Vercel & Railway)
+
+This repository is designed for a split deployment architecture:
+1. **Frontend (Vercel)**: Import the repository, set the root directory to `web`, and configure:
+   - `PUBLIC_API_URL`: The URL of your deployed backend (e.g., `https://x402-hedera-web-production.up.railway.app`).
+   - `PUBLIC_REOWN_PROJECT_ID`: Your Reown project ID.
+2. **Backend (Railway)**: Deploy the root of the repository to Railway and configure:
+   - `FRONTEND_URL`: The URL of your Vercel deployment (e.g., `https://dino-x402-web.vercel.app`) to strictly allow CORS.
+   - `PORT`: (e.g., `4021`)
+   - Your Hedera credentials (`HEDERA_CLIENT_ID`, `HEDERA_CLIENT_KEY`, `PAY_TO_ACCOUNT`).
+   - `DATA_PROVIDER` (e.g., `market`).
+
+*Note: The SQLite database (`data/agent.sqlite`) is re-created as a fresh slate in the cloud.*
+
+---
+
 ## How the product feels
 
 ### First visit: choose custody
