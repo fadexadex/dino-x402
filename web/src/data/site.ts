@@ -1,5 +1,5 @@
 export const site = {
-  apiBase: "http://localhost:4021",
+  apiBase: import.meta.env?.PUBLIC_API_URL || "",
   network: "hedera:testnet",
   asset: "0.0.0",
   payTo: "0.0.4515756",

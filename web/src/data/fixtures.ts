@@ -45,7 +45,7 @@ export const response402 = {
   x402Version: 2,
   error: "Payment required",
   resource: {
-    url: "http://localhost:4021/data/spot-price?symbol=AAPL",
+    url: "/data/spot-price?symbol=AAPL",
     description: "Financial market data, price and params vary by product",
     mimeType: "",
   },

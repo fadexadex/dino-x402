@@ -108,7 +108,8 @@ export type DashboardSnapshot = {
   receipts?: Receipt[];
 };
 
-const API = "/api/v1";
+const BASE_URL = import.meta.env?.PUBLIC_API_URL || "";
+const API = `${BASE_URL}/api/v1`;
 const ACTIVE_PROFILE_KEY = "dino.activeProfileId";
 
 export function getPreferredProfileId(): string | null {
@@ -234,7 +235,7 @@ export const api = {
   removeSession: (profileId: string) =>
     request<{ ok: boolean; profileId: string }>(`/profiles/${profileId}`, { method: "DELETE" }),
   disconnectAccount: async () => {
-    const response = await fetch("/api/account/disconnect", {
+    const response = await fetch(`${BASE_URL}/api/account/disconnect`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
@@ -247,7 +248,7 @@ export const api = {
     return response.json() as Promise<{ disconnected: boolean; accountId: string | null }>;
   },
   connectAccount: async (accountId: string, label?: string) => {
-    const response = await fetch("/api/account/connect", {
+    const response = await fetch(`${BASE_URL}/api/account/connect`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
@@ -278,7 +279,7 @@ export const api = {
     autonomyMode: 1 | 2 | 3 | 4 | null;
   }>("/onboarding"),
   completeOnboarding: async (autonomyMode: 1 | 2 | 3 | 4, objective?: string) => {
-    const response = await fetch("/api/v1/onboarding/complete", {
+    const response = await fetch(`${BASE_URL}/api/v1/onboarding/complete`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },

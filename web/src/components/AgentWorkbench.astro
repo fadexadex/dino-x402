@@ -146,7 +146,8 @@ const presets = [
         return { symbol: match[1], ...(match[2] ? { allocationPct: Number(match[2]) } : {}) };
       }).filter((holding): holding is { symbol: string; allocationPct?: number } => Boolean(holding));
       if (!portfolio.length) throw new Error("Enter allocations like HBAR 48%, BTC 32%, ETH 20%.");
-      const response = await fetch("http://localhost:4021/api/agent/run", {
+      const BASE_URL = import.meta.env?.PUBLIC_API_URL || "";
+      const response = await fetch(`${BASE_URL}/api/agent/run`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({

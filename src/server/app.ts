@@ -279,8 +279,9 @@ export const createApp = (
 
   app.use("/api/*", cors({
     origin: (origin) => {
-      if (!origin || /^http:\/\/(localhost|127\.0\.0\.1|localhost:4321)(:\d+)?$/.test(origin)) return origin;
-      return "";
+      if (!origin) return "";
+      if (process.env.FRONTEND_URL) return process.env.FRONTEND_URL;
+      return origin; // Allow any origin if FRONTEND_URL is not strictly set, useful for Vercel preview deployments.
     },
     allowHeaders: ["Content-Type", "Last-Event-ID", "Idempotency-Key"],
     allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
@@ -659,7 +660,7 @@ export const createApp = (
       if (key) inFlightManualRuns.set(key, work);
       const result = await work;
       if (key) inFlightManualRuns.delete(key);
-      return c.json(jsonSafe(result), result.status === "failed" ? 502 : 200);
+      return c.json(jsonSafe(result), 200);
     } catch (error) {
       if (idempotencyKey) inFlightManualRuns.delete(`${profile.id}:${idempotencyKey}`);
       return c.json({ error: error instanceof Error ? error.message : "Unable to start run" }, 500);
@@ -751,6 +752,116 @@ export const createApp = (
     }
   });
 
+  async function confirmTradeInternal(tradeId: string, transactionId: string) {
+    const trade = store.getState().pendingTrades.find((item) => item.id === tradeId && item.status === "pending");
+    if (!trade) return null;
+    const profileId = store.getState().profiles?.find((profile) => profile.accountId === trade.accountId)?.id;
+    const result = {
+      success: true,
+      transactionId,
+      hashscanUrl: `https://hashscan.io/testnet/transaction/${transactionId}`,
+      fromToken: trade.quote?.fromToken ?? "",
+      fromSymbol: trade.proposal.fromSymbol,
+      toToken: trade.quote?.toToken ?? "",
+      toSymbol: trade.proposal.toSymbol,
+      amountIn: trade.quote?.amountIn ?? 0n,
+      amountInFormatted: trade.proposal.amountFormatted,
+    };
+    store.updatePendingTrade(trade.id, { status: "approved", executionResult: result }, profileId);
+    const run = store.getState().runs.find((item) => item.id === trade.runId);
+    let portfolioAfter = run?.portfolioAfter;
+    if (run?.portfolioBefore) {
+      try {
+        const afterRaw = await readPortfolio(trade.accountId, { mirrorBaseUrl: config.mirrorNodeBaseUrl });
+        const prices = pricesUsdFromPortfolio(run.portfolioBefore);
+        const managed = ["HBAR", "USDC", "SAUCE"].map((symbol) => afterRaw.allocations.find((item) => item.symbol.toUpperCase() === symbol) ?? {
+          symbol,
+          balanceFormatted: 0,
+          usdValue: 0,
+          allocationPct: 0,
+        });
+        portfolioAfter = valuePortfolio({ ...afterRaw, allocations: managed }, prices);
+      } catch {
+        portfolioAfter = undefined;
+      }
+    }
+    if (run) {
+      store.updateRun(run.id, {
+        status: "completed",
+        tradeExecutions: [...run.tradeExecutions, result],
+        completedAt: new Date().toISOString(),
+        ...(portfolioAfter ? { portfolioAfter } : {}),
+      }, profileId);
+    }
+    store.recordSpend(0, trade.proposal.amountFormatted, profileId);
+    const verifiedEventPayload = {
+      presentInUi: true,
+      title: "Swap completed in your wallet",
+      detail: `Your wallet confirmed the exchange.`,
+      tradeId: trade.id,
+      result,
+      transactionId,
+    };
+    store.appendEvent("trade.verified", verifiedEventPayload, { profileId, runId: trade.runId, provenance: "live" });
+    sseBroadcaster.broadcast("trade.verified", verifiedEventPayload, { profileId, runId: trade.runId, provenance: "live" });
+
+    if (portfolioAfter) {
+      const portfolioEventPayload = {
+        presentInUi: true,
+        title: "Portfolio refreshed after the swap",
+        detail: "Balances and mix updated from live holdings.",
+        tradeId: trade.id,
+        portfolio: portfolioAfter,
+      };
+      store.appendEvent("portfolio.updated", portfolioEventPayload, { profileId, runId: trade.runId, provenance: "live" });
+      sseBroadcaster.broadcast("portfolio.updated", portfolioEventPayload, { profileId, runId: trade.runId, provenance: "live" });
+    }
+    return { status: "confirmed", tradeId: trade.id, execution: result };
+  }
+
+  // Background poller: Server-side auto-verifier for pending user-wallet trades.
+  // Detects when the user completes the transaction in HashPack on-chain without relying on fragile browser WalletConnect callbacks.
+  setInterval(async () => {
+    const pending = store.getState().pendingTrades.filter((t) => t.status === "pending");
+    if (pending.length === 0) return;
+    for (const trade of pending) {
+      try {
+        const createdAtMs = new Date(trade.createdAt).getTime();
+        const url = `${config.mirrorNodeBaseUrl}/api/v1/transactions?account.id=${encodeURIComponent(trade.accountId)}&limit=10&order=desc`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
+        if (!res.ok) continue;
+        const data = await res.json() as {
+          transactions?: Array<{
+            transaction_id?: string;
+            consensus_timestamp?: string;
+            valid_start_timestamp?: string;
+            result?: string;
+            name?: string;
+          }>;
+        };
+        const found = data.transactions?.find((tx) => {
+          if (tx.result !== "SUCCESS") return false;
+          const validSec = tx.valid_start_timestamp
+            ? parseFloat(tx.valid_start_timestamp)
+            : tx.consensus_timestamp
+              ? parseFloat(tx.consensus_timestamp)
+              : 0;
+          if (validSec * 1000 < createdAtMs - 60_000) return false;
+          return tx.name === "CONTRACTCALL" || tx.name === "CRYPTOTRANSFER" || tx.name === "CONTRACTCREATEINSTANCE";
+        });
+        if (found && found.transaction_id) {
+          const formattedTxId = found.transaction_id.includes("-")
+            ? found.transaction_id.replace("-", "@").replace(/-([^-]+)$/, ".$1")
+            : found.transaction_id;
+          console.log(`[server-autoverifier] Automatically verified on-chain trade ${trade.id} via Mirror Node (${formattedTxId})`);
+          await confirmTradeInternal(trade.id, formattedTxId);
+        }
+      } catch {
+        // Ignore background polling network glitches
+      }
+    }
+  }, 3000);
+
   app.post("/api/v1/proposals/:id/confirm", async (c) => {
     try {
       const trade = store.getState().pendingTrades.find((item) => item.id === c.req.param("id") && item.status === "pending");
@@ -760,63 +871,9 @@ export const createApp = (
       if (!transactionId || !transactionId.includes("@")) {
         return c.json({ error: "A Hedera transactionId is required" }, 400);
       }
-      const profileId = store.getState().profiles?.find((profile) => profile.accountId === trade.accountId)?.id;
-      const result = {
-        success: true,
-        transactionId,
-        hashscanUrl: `https://hashscan.io/testnet/transaction/${transactionId}`,
-        fromToken: trade.quote?.fromToken ?? "",
-        fromSymbol: trade.proposal.fromSymbol,
-        toToken: trade.quote?.toToken ?? "",
-        toSymbol: trade.proposal.toSymbol,
-        amountIn: trade.quote?.amountIn ?? 0n,
-        amountInFormatted: trade.proposal.amountFormatted,
-      };
-      store.updatePendingTrade(trade.id, { status: "approved", executionResult: result }, profileId);
-      const run = store.getState().runs.find((item) => item.id === trade.runId);
-      let portfolioAfter = run?.portfolioAfter;
-      if (run?.portfolioBefore) {
-        try {
-          const afterRaw = await readPortfolio(trade.accountId, { mirrorBaseUrl: config.mirrorNodeBaseUrl });
-          const prices = pricesUsdFromPortfolio(run.portfolioBefore);
-          const managed = ["HBAR", "USDC", "SAUCE"].map((symbol) => afterRaw.allocations.find((item) => item.symbol.toUpperCase() === symbol) ?? {
-            symbol,
-            balanceFormatted: 0,
-            usdValue: 0,
-            allocationPct: 0,
-          });
-          portfolioAfter = valuePortfolio({ ...afterRaw, allocations: managed }, prices);
-        } catch {
-          portfolioAfter = undefined;
-        }
-      }
-      if (run) {
-        store.updateRun(run.id, {
-          status: "completed",
-          tradeExecutions: [...run.tradeExecutions, result],
-          completedAt: new Date().toISOString(),
-          ...(portfolioAfter ? { portfolioAfter } : {}),
-        }, profileId);
-      }
-      store.recordSpend(0, trade.proposal.amountFormatted, profileId);
-      sseBroadcaster.broadcast("trade.verified", {
-        presentInUi: true,
-        title: "Swap completed in your wallet",
-        detail: `Your wallet confirmed the exchange.`,
-        tradeId: trade.id,
-        result,
-        transactionId,
-      }, { profileId, runId: trade.runId, provenance: "live" });
-      if (portfolioAfter) {
-        sseBroadcaster.broadcast("portfolio.updated", {
-          presentInUi: true,
-          title: "Portfolio refreshed after the swap",
-          detail: "Balances and mix updated from live holdings.",
-          tradeId: trade.id,
-          portfolio: portfolioAfter,
-        }, { profileId, runId: trade.runId, provenance: "live" });
-      }
-      return c.json(jsonSafe({ status: "confirmed", tradeId: trade.id, execution: result }));
+      const res = await confirmTradeInternal(trade.id, transactionId);
+      if (!res) return c.json({ error: "Trade confirm failed" }, 400);
+      return c.json(jsonSafe({ status: "confirmed", tradeId: trade.id, execution: res.execution }));
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : "Confirm failed" }, 502);
     }
@@ -1142,7 +1199,7 @@ export const createApp = (
       }
     }
     const result = await agent.run(input);
-    return c.json(result, result.status === "completed" ? 200 : 502);
+    return c.json(result, 200);
   });
 
   app.post("/api/agent/manage", async (c) => {

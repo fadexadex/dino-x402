@@ -9,7 +9,7 @@ import type {
 
 const DEFAULT_SCHEDULE: ScheduleConfig = {
   enabled: false, intervalMinutes: 5, autonomousTrading: false, dataBudgetHbar: 0.1,
-  maxTradeHbar: 10, dailyBudgetCapHbar: 2, watchedSymbols: ["HBAR", "USDC", "USDT", "SAUCE", "KARATE"],
+  maxTradeHbar: 10, dailyBudgetCapHbar: 1000, watchedSymbols: ["HBAR", "USDC", "USDT", "SAUCE", "KARATE"],
 };
 
 const defaults = (): StoreState => ({

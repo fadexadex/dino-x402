@@ -47,7 +47,7 @@ function errorText(error: unknown): string {
 }
 
 function isStaleSessionError(error: unknown): boolean {
-  return /no matching key|failed to process an inbound message|session topic doesn't exist|no matching session|missing or invalid|unauthorized|session no longer exists|without any listeners|websocket|failed to process/i.test(
+  return /Query\.fromBytes|no matching key|failed to process an inbound message|session topic doesn't exist|no matching session|missing or invalid|unauthorized|session no longer exists|without any listeners|websocket|failed to process/i.test(
     errorText(error),
   );
 }
@@ -82,13 +82,70 @@ async function isAssociated(accountId: string, tokenId: string): Promise<boolean
   return body.tokens?.some((token) => token.token_id === tokenId) ?? false;
 }
 
+async function checkMirrorNodeSuccess(transactionId: string, iteration: number = 0): Promise<boolean> {
+  try {
+    const parts = transactionId.split('@');
+    if (parts.length !== 2) return false;
+    const accountId = parts[0];
+    const timestamp = parts[1].replace('.', '-');
+    const mirrorId = `${accountId}-${timestamp}`;
+    
+    // The Mirror Node rejects arbitrary query parameters (like ?nocache=...) on the /transactions/{id} endpoint with a 400 Bad Request.
+    // Cloudflare edge aggressively caches 404s. To bust the cache, we use the generic search endpoint for the account's recent transactions.
+    // By slightly varying a valid `timestamp=gt:...` parameter on each iteration, we guarantee a unique URL that bypasses the CDN cache.
+    const cacheBusterTimestamp = Math.floor(Date.now() / 1000) - 86400 + iteration;
+    const url = `https://testnet.mirrornode.hedera.com/api/v1/transactions?account.id=${accountId}&timestamp=gt:${cacheBusterTimestamp}&limit=100&order=desc`;
+    
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(4000),
+      cache: "no-store",
+    });
+    if (response.ok) {
+      const data = await response.json() as { transactions?: Array<{ transaction_id?: string, result?: string }> };
+      if (data.transactions?.some((t) => t.transaction_id === mirrorId && t.result === "SUCCESS")) {
+        return true;
+      }
+    }
+  } catch (error) {
+    // Ignore fetch errors
+  }
+  return false;
+}
+
 /** One WalletConnect round-trip: freeze → SignAndExecute (do NOT also signWithSigner). */
 async function sendWithWallet(signer: HederaSigner, transaction: Transaction): Promise<string> {
   const frozen = await prepareForWalletSigner(transaction).freezeWithSigner(signer);
-  const response = await frozen.executeWithSigner(signer) as TransactionResponse;
-  const transactionId = response.transactionId?.toString();
-  if (!transactionId) throw new Error("Wallet submitted the transaction but returned no transaction id.");
-  return transactionId;
+  const transactionId = frozen.transactionId?.toString();
+  if (!transactionId) throw new Error("Could not determine transaction ID before signing.");
+  
+  try {
+    return await Promise.race([
+      frozen.executeWithSigner(signer).then(() => transactionId),
+      // WalletConnect v2 websockets frequently drop responses, causing executeWithSigner to hang indefinitely.
+      // We concurrently poll the Mirror Node for up to 90 seconds. If the transaction succeeds on-chain,
+      // we can safely resolve and ignore WalletConnect's hanging promise.
+      (async () => {
+        await new Promise((r) => setTimeout(r, 4000));
+        for (let i = 0; i < 45; i++) {
+          if (await checkMirrorNodeSuccess(transactionId, i)) return transactionId;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        throw new Error("WalletConnect did not respond and the transaction was not found on the network after 90 seconds.");
+      })()
+    ]);
+  } catch (error) {
+    // If WalletConnect crashed but the user already approved it, it might have succeeded on-chain.
+    const message = errorText(error);
+    if (/Query\.fromBytes/i.test(message) || isStaleSessionError(error)) {
+      // It threw an error quickly, so the polling promise above was cancelled by the Promise.race rejection.
+      // We must poll again here for a few seconds to give the Mirror Node time to index it.
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        if (await checkMirrorNodeSuccess(transactionId, i)) return transactionId;
+      }
+    }
+    throw error;
+  }
 }
 
 /**
@@ -174,14 +231,6 @@ export async function signAndExecuteSwap(
     const transactionId = await submitSwap(signer, accountId, signing);
     return { transactionId };
   } catch (error) {
-    if (!isStaleSessionError(error)) throw friendlyWalletError(error);
-    // Relay/key desync mid-sign — wipe IndexedDB and pair once more.
-    try {
-      const signer = await ensureWalletSession(accountId);
-      const transactionId = await submitSwap(signer, accountId, signing);
-      return { transactionId };
-    } catch (retryError) {
-      throw friendlyWalletError(retryError);
-    }
+    throw friendlyWalletError(error);
   }
 }

@@ -201,11 +201,10 @@ export function DinoWorkspace() {
         if (!walletConfig.enabled) {
           throw new Error("WalletConnect is not configured (PUBLIC_REOWN_PROJECT_ID). Reconnect from /connect after setting it.");
         }
-        // Re-pair on the existing WC Core (never re-init — that breaks proposal keys).
-        setSendError("Pair HashPack in the WalletConnect modal…");
         try {
           const needed = profile?.accountId;
-          const paired = await connectWallet({ force: true });
+          // Only prompt for pairing if no active session exists for this account.
+          const paired = await connectWallet();
           if (needed && paired !== needed) {
             throw new Error(`Connected ${paired}, but this proposal needs ${needed}. Pair the correct account.`);
           }
@@ -217,8 +216,8 @@ export function DinoWorkspace() {
           if (!result.signing || !result.accountId) {
             throw new Error("Server asked for a wallet signature but did not return signing details.");
           }
-          setSendError("Approve the HashPack prompt(s) — keep this tab open until it finishes.");
-          // Reuse the pairing from above — do not force a second modal.
+          setSendError("Approve the HashPack prompt(s) in your wallet.");
+          // Trigger HashPack wallet popup
           const { transactionId } = await signAndExecuteSwap(result.accountId, result.signing, { reuseSession: true });
           await api.confirmProposal(proposalId, transactionId);
           confirmed = true;
@@ -231,11 +230,15 @@ export function DinoWorkspace() {
       } catch (err) {
         const message = err instanceof Error ? err.message : "Could not approve the trade in your wallet.";
         setSendError(
-          /no matching key|failed to process an inbound message|session topic|without any listeners|relay\/key desync|lost the session/i.test(message)
-            ? "WalletConnect dropped the response (relay desync). Click Approve again and re-pair when the modal opens — leave this tab open until HashPack completes."
-            : /user rejected|denied|closed|cancel/i.test(message)
-              ? "Wallet prompt was closed or rejected. Click Approve in wallet again when ready."
-            : message,
+          /quote expired|executable quote expired/i.test(message)
+            ? "The SaucerSwap quote expired before the swap could complete. Send a new swap request to get a fresh quote."
+            : /no fresh executable|has no fresh/i.test(message)
+              ? "This proposal no longer has a valid quote. Send a new swap request to try again."
+            : /no matching key|failed to process an inbound message|session topic|without any listeners|relay\/key desync|lost the session/i.test(message)
+              ? "WalletConnect dropped the response (relay desync). Click Approve again and re-pair when the modal opens — leave this tab open until HashPack completes."
+              : /user rejected|denied|closed|cancel/i.test(message)
+                ? "Wallet prompt was closed or rejected. Click Approve in wallet again when ready."
+              : message,
         );
       } finally {
         setApproving(false);
@@ -659,7 +662,7 @@ export function DinoWorkspace() {
                     </ul>
                   </section>
 
-                  {(error || sendError) && <section role="alert" className="rounded-lg border border-orange/30 bg-orange-soft p-3 text-[12px] text-orange">{sendError ?? error}</section>}
+
                   {!run.connected && (
                     <section className="rounded-lg border border-line bg-card p-5 text-center">
                       <p className="text-[14px] font-medium text-ink">
@@ -755,6 +758,19 @@ export function DinoWorkspace() {
 
               <div className="shrink-0 border-t border-line bg-paper px-5 py-3">
                 <div className="mx-auto w-full max-w-3xl">
+                  {(error || sendError) && (
+                    <section role="alert" className="mb-3 flex items-start gap-2 rounded-lg border border-orange/30 bg-orange-soft p-3 text-[12px] text-orange">
+                      <span className="flex-1">{sendError ?? error}</span>
+                      <button
+                        type="button"
+                        onClick={() => { setSendError(null); }}
+                        className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-orange transition-colors hover:bg-orange/10"
+                        aria-label="Dismiss error"
+                      >
+                        ✕
+                      </button>
+                    </section>
+                  )}
                   {rightNowPlacement === "Above composer" && <div className="mb-3">{rightNow}</div>}
                   {run.halted && run.connected && (
                     <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-orange/30 bg-card px-3 py-2.5">

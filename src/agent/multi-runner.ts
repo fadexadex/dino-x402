@@ -235,8 +235,9 @@ export class MultiAssetAgentRunner {
         throw new Error("HBAR, USDC, and SAUCE must all have live intelligence before allocation decisions");
       }
       let spend = 0n;
+      const mandate = profileId ? store.getLatestMandate(profileId) : null;
       const cycleBudget = BigInt(Math.floor(state.schedule.dataBudgetHbar * 1e8));
-      const dailyBudget = BigInt(Math.floor(state.schedule.dailyBudgetCapHbar * 1e8));
+      const dailyBudget = BigInt(Math.floor(Number(mandate?.risk?.maxDailyDataHbar ?? mandate?.risk?.maxDailySpend ?? state.schedule.dailyBudgetCapHbar) * 1e8));
       const alreadySpentToday = BigInt(Math.floor(state.spending.todayDataHbar * 1e8));
       for (const symbol of selected) {
         const cached = this.signalCache.get(symbol);

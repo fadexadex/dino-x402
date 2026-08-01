@@ -51,9 +51,13 @@ const fetchJson = async <T>(url: string, cacheTtlMs: number): Promise<T> => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 6_000);
     try {
+      const headers: Record<string, string> = { accept: "application/json", "user-agent": "MarketRail-x402-demo/1.0" };
+      if (process.env.COINGECKO_API_KEY) {
+        headers["x-cg-demo-api-key"] = process.env.COINGECKO_API_KEY;
+      }
       const response = await fetch(url, {
         signal: controller.signal,
-        headers: { accept: "application/json", "user-agent": "MarketRail-x402-demo/1.0" },
+        headers,
       });
       if (response.ok) {
         const value = await response.json() as T;
